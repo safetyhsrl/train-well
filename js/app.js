@@ -495,7 +495,8 @@
 
   async function showEmployee(id) {
     const e = check(await sb.from("employees").select("*").eq("id", id).single());
-    const comps = check(await sb.from("completions").select("*").eq("employee_id", id).order("completed_on", { ascending: false }));
+    const comps = check(await sb.from("completions").select("*").eq("employee_id", id)
+      .order("completed_on", { ascending: false, nullsFirst: false }).order("expires_on", { ascending: false, nullsFirst: false }));
     const latest = new Map();
     for (const c of comps) if (!latest.has(c.course_id)) latest.set(c.course_id, c);
     const mandatory = state.courses.filter((c) => c.mandatory && c.active);
@@ -537,7 +538,7 @@
     async render(view) {
       const recs = await fetchAll(() => sb.from("completions")
         .select("*, employees!inner(id, first_name, last_name, employee_no, facility_id, status)")
-        .order("completed_on", { ascending: false }));
+        .order("completed_on", { ascending: false, nullsFirst: false }));
       const f = this.filters;
       view.innerHTML = `
         <div class="card">
@@ -641,14 +642,14 @@
         ${isNew ? employeePicker(employees, employeeIds) : ""}
         <div class="grid2">
           <div class="field"><label>Course *</label><select name="course_id" required>${courseOptions(r?.course_id)}</select></div>
-          <div class="field"><label>Date completed *</label><input type="date" name="completed_on" required value="${esc(r?.completed_on || todayISO())}"></div>
+          <div class="field"><label>Date completed ${isNew ? "*" : ""}</label><input type="date" name="completed_on" ${isNew ? "required" : ""} value="${esc(isNew ? todayISO() : (r.completed_on || ""))}"></div>
           <div class="field"><label>Expiry date <span class="muted">(blank = from course)</span></label><input type="date" name="expires_on" value="${esc(r?.expires_on)}"></div>
           <div class="field"><label>Score</label><input type="number" step="0.01" name="score" value="${esc(r?.score)}"></div>
           <div class="field"><label>Certificate #</label><input name="certificate_no" value="${esc(r?.certificate_no)}"></div>
         </div>
         <div class="field"><label>Notes</label><textarea name="notes" rows="2">${esc(r?.notes)}</textarea></div>`,
       async onSubmit(d, frm) {
-        const base = { course_id: Number(d.course_id), completed_on: d.completed_on, expires_on: nn(d.expires_on),
+        const base = { course_id: Number(d.course_id), completed_on: nn(d.completed_on), expires_on: nn(d.expires_on),
           score: nn(d.score), certificate_no: nn(d.certificate_no), notes: nn(d.notes) };
         if (isNew) {
           const ids = pickedIds(frm);
