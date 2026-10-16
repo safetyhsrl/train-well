@@ -350,7 +350,7 @@
       view.innerHTML = `
         <div class="card">
           <div class="toolbar">
-            <input type="search" placeholder="Search name, number, title…" value="${esc(f.q)}" data-f="q">
+            <input type="search" placeholder="Search name, title, department…" value="${esc(f.q)}" data-f="q">
             ${isAdmin() ? `<select data-f="facility">${facilityOptions(f.facility, { includeAll: true })}</select>` : ""}
             <select data-f="status">
               <option value="active" ${f.status === "active" ? "selected" : ""}>Active</option>
@@ -360,7 +360,7 @@
             <span class="spacer"></span>${bulkBtn()}<span class="muted" data-count></span>
           </div>
           <div class="table-wrap"><table>
-            <thead><tr>${selHead()}<th>Emp #</th><th>Name</th><th>Job title</th><th>Department</th><th>Facility</th><th>Status</th><th>Mandatory training</th><th></th></tr></thead>
+            <thead><tr>${selHead()}<th>Name</th><th>Job title</th><th>Department</th><th>Facility</th><th>Status</th><th>Mandatory training</th><th></th></tr></thead>
             <tbody data-rows></tbody></table></div>
         </div>`;
 
@@ -379,13 +379,12 @@
         $("[data-rows]", view).innerHTML = rows.map((e) => {
           const g = e.status === "active" ? gaps(e) : null;
           return `<tr>${selCell(e.id)}
-            <td>${esc(e.employee_no || "—")}</td>
             <td><button class="link" data-view="${e.id}">${esc(fullName(e))}</button></td>
             <td>${esc(e.job_title || "—")}</td><td>${esc(e.department || "—")}</td>
             <td>${esc(facilityName(e.facility_id))}</td><td>${badge(e.status)}</td>
             <td>${g === null ? "—" : g === 0 ? badge("valid", "Up to date") : badge("expired", g + " outstanding")}</td>
             <td class="actions"><button class="link small" data-edit="${e.id}">Edit</button> ${delBtn(e.id)}</td></tr>`;
-        }).join("") || `<tr><td colspan="9" class="empty">No employees match. Add one or import a CSV.</td></tr>`;
+        }).join("") || `<tr><td colspan="8" class="empty">No employees match. Add one or import a CSV.</td></tr>`;
         $$("[data-view]", view).forEach((b) => b.onclick = () => showEmployee(Number(b.dataset.view)));
         $$("[data-edit]", view).forEach((b) => b.onclick = () => editEmployee(all.find((e) => e.id === Number(b.dataset.edit))));
         $$("[data-del]", view).forEach((b) => b.onclick = async () => {
@@ -404,8 +403,8 @@
         if (act === "add") editEmployee(null);
         if (act === "import") importEmployees();
         if (act === "export") downloadCSV(`trainwell-employees-${todayISO()}.csv`, [
-          ["employee_no", "first_name", "last_name", "email", "phone", "job_title", "department", "facility", "hire_date", "status"],
-          ...all.map((e) => [e.employee_no, e.first_name, e.last_name, e.email, e.phone, e.job_title, e.department,
+          ["first_name", "last_name", "email", "phone", "job_title", "department", "facility", "hire_date", "status"],
+          ...all.map((e) => [e.first_name, e.last_name, e.email, e.phone, e.job_title, e.department,
             facilityName(e.facility_id), e.hire_date, e.status])
         ]);
       };
@@ -420,7 +419,6 @@
         <div class="grid2">
           <div class="field"><label>First name *</label><input name="first_name" required value="${esc(e.first_name)}"></div>
           <div class="field"><label>Last name *</label><input name="last_name" required value="${esc(e.last_name)}"></div>
-          <div class="field"><label>Employee number</label><input name="employee_no" value="${esc(e.employee_no)}"></div>
           <div class="field"><label>Facility *</label>
             <select name="facility_id" required ${isAdmin() ? "" : "disabled"}>${facilityOptions(e.facility_id)}</select></div>
           <div class="field"><label>Job title</label><input name="job_title" value="${esc(e.job_title)}"></div>
@@ -434,7 +432,7 @@
         </div>`,
       async onSubmit(d) {
         const row = {
-          first_name: d.first_name.trim(), last_name: d.last_name.trim(), employee_no: nn(d.employee_no),
+          first_name: d.first_name.trim(), last_name: d.last_name.trim(),
           facility_id: Number(isAdmin() ? d.facility_id : (e.facility_id || state.me.facility_id)),
           job_title: nn(d.job_title), department: nn(d.department), email: nn(d.email), phone: nn(d.phone),
           hire_date: nn(d.hire_date), status: d.status
@@ -450,9 +448,9 @@
     const { form } = openModal({
       title: "Import employees from CSV", submitText: "Import",
       body: `
-        <p class="muted" style="margin-top:0">Columns (first row = headers): <code>employee_no, first_name, last_name, email, phone,
+        <p class="muted" style="margin-top:0">Columns (first row = headers): <code>first_name, last_name, email, phone,
         job_title, department, facility, hire_date</code>. Only first and last name are required. <code>facility</code> must match a
-        facility name${isAdmin() ? "" : " (or leave blank for yours)"}. Dates as YYYY-MM-DD. Rows with an existing employee number are updated.</p>
+        facility name${isAdmin() ? "" : " (or leave blank for yours)"}. Dates as YYYY-MM-DD.</p>
         <p><button type="button" class="link" data-template>Download a blank template</button></p>
         <div class="field"><label>CSV file</label><input type="file" name="file" accept=".csv,text/csv" required></div>
         <div data-preview class="muted"></div>`,
@@ -488,8 +486,8 @@
     });
     $("[data-err]", form).style.whiteSpace = "pre-line";
     $("[data-template]", form).onclick = () => downloadCSV("trainwell-employee-template.csv", [
-      ["employee_no", "first_name", "last_name", "email", "phone", "job_title", "department", "facility", "hire_date"],
-      ["1001", "Jane", "Doe", "jane@example.com", "709-555-0100", "Operator", "Production", state.facilities[0]?.name || "Facility 1", "2024-03-15"]
+      ["first_name", "last_name", "email", "phone", "job_title", "department", "facility", "hire_date"],
+      ["Jane", "Doe", "jane@example.com", "709-555-0100", "Operator", "Production", state.facilities[0]?.name || "Facility 1", "2024-03-15"]
     ]);
   }
 
@@ -504,7 +502,7 @@
     const { form } = openModal({
       title: fullName(e), wide: true,
       body: `
-        <p class="muted" style="margin-top:0">${esc([e.employee_no && "#" + e.employee_no, e.job_title, e.department, facilityName(e.facility_id)].filter(Boolean).join(" · "))}
+        <p class="muted" style="margin-top:0">${esc([e.job_title, e.department, facilityName(e.facility_id)].filter(Boolean).join(" · "))}
           ${e.hire_date ? " · Hired " + fmtDate(e.hire_date) : ""} · ${badge(e.status)}</p>
         <h3>Mandatory training</h3>
         <div class="table-wrap"><table><thead><tr><th>Course</th><th>Status</th><th>Completed</th><th>Expires</th></tr></thead><tbody>
@@ -589,8 +587,8 @@
       this.onAction = (act) => {
         if (act === "add") editRecord(null);
         if (act === "export") downloadCSV(`trainwell-training-records-${todayISO()}.csv`, [
-          ["employee_no", "employee", "facility", "course", "completed_on", "expires_on", "status", "score", "certificate_no", "notes"],
-          ...shown.map((r) => [r.employees.employee_no, fullName(r.employees), facilityName(r.employees.facility_id),
+          ["employee", "facility", "course", "completed_on", "expires_on", "status", "score", "certificate_no", "notes"],
+          ...shown.map((r) => [fullName(r.employees), facilityName(r.employees.facility_id),
             courseTitle(r.course_id), r.completed_on, r.expires_on, expiryStatus(r.expires_on), r.score, r.certificate_no, r.notes])
         ]);
       };
@@ -612,7 +610,7 @@
           ${employees.map((e) => `<label style="display:flex;gap:.5rem;align-items:center;font-weight:400;color:var(--text);margin:.3rem 0"
               data-name="${esc((fullName(e) + " " + (e.employee_no || "")).toLowerCase())}" data-fac="${e.facility_id}">
             <input type="checkbox" name="emp" value="${e.id}" ${sel.has(e.id) ? "checked" : ""}>
-            ${esc(fullName(e))} <span class="muted">${esc(e.employee_no ? "#" + e.employee_no : "")} · ${esc(facilityName(e.facility_id))}</span></label>`).join("")
+            ${esc(fullName(e))} <span class="muted">· ${esc(facilityName(e.facility_id))}</span></label>`).join("")
             || `<p class="muted">No employees available.</p>`}
         </div></div>`;
   }
