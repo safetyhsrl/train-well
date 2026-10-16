@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Sign in · Train Well</title>
+  <link rel="stylesheet" href="css/styles.css">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='7' fill='%230f5e5a'/><text x='16' y='22' font-size='15' font-family='Arial' font-weight='bold' fill='white' text-anchor='middle'>TW</text></svg>">
+</head>
+<body>
+  <div class="login-wrap">
+    <form class="login-card" id="loginForm" autocomplete="on">
+      <div class="logo"><span class="logo-mark">TW</span> Train Well</div>
+      <h1>Manager sign in</h1>
+      <p class="muted" style="margin-top:0">Training management for all facilities.</p>
+
+      <div id="msg" class="alert hidden"></div>
+
+      <div class="field">
+        <label for="email">Email</label>
+        <input id="email" type="email" required autocomplete="username">
+      </div>
+      <div class="field">
+        <label for="password">Password</label>
+        <input id="password" type="password" required autocomplete="current-password">
+      </div>
+      <button type="submit" id="loginBtn">Sign in</button>
+      <p style="text-align:center;margin:1rem 0 0">
+        <button type="button" class="link" id="forgotBtn">Forgot password?</button>
+      </p>
+    </form>
+
+    <form class="login-card hidden" id="resetForm">
+      <div class="logo"><span class="logo-mark">TW</span> Train Well</div>
+      <h1>Set a new password</h1>
+      <div id="resetMsg" class="alert hidden"></div>
+      <div class="field">
+        <label for="newPassword">New password (min 8 characters)</label>
+        <input id="newPassword" type="password" minlength="8" required autocomplete="new-password">
+      </div>
+      <button type="submit">Save password</button>
+    </form>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <script src="js/config.js"></script>
+  <script src="js/client.js"></script>
+  <script src="js/auth.js"></script>
+</body>
+</html>

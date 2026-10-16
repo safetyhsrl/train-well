@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Train Well</title>
+  <link rel="stylesheet" href="css/styles.css">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='7' fill='%230f5e5a'/><text x='16' y='22' font-size='15' font-family='Arial' font-weight='bold' fill='white' text-anchor='middle'>TW</text></svg>">
+</head>
+<body>
+  <div class="shell hidden" id="shell">
+    <aside class="sidebar" id="sidebar">
+      <div class="logo"><span class="logo-mark">TW</span> Train Well</div>
+      <nav class="nav" id="nav">
+        <a href="#dashboard">Dashboard</a>
+        <a href="#employees">Employees</a>
+        <a href="#records">Training records</a>
+        <a href="#sessions">Sessions &amp; attendance</a>
+        <a href="#courses">Courses</a>
+        <div class="section admin-only">Administration</div>
+        <a href="#users" class="admin-only">Users</a>
+        <a href="#facilities" class="admin-only">Facilities</a>
+      </nav>
+      <div class="me">
+        <strong id="meName"></strong>
+        <span id="meRole" class="muted" style="color:#a9c5c1"></span>
+        <button id="logoutBtn" type="button">Sign out</button>
+      </div>
+    </aside>
+    <main class="main">
+      <div class="topbar">
+        <div style="display:flex;gap:.6rem;align-items:center">
+          <button class="secondary menu-toggle" id="menuBtn" type="button">☰</button>
+          <h1 id="pageTitle">Dashboard</h1>
+        </div>
+        <div id="pageActions" class="toolbar" style="margin:0"></div>
+      </div>
+      <div id="view"></div>
+    </main>
+  </div>
+
+  <div id="modalRoot"></div>
+  <div id="toast" class="hidden"></div>
+
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <script src="js/config.js"></script>
+  <script src="js/client.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,4 @@
+employee_no,first_name,last_name,email,phone,job_title,department,facility,hire_date
+1001,Jane,Doe,jane.doe@example.com,709-555-0100,Machine Operator,Production,Facility 1,2024-03-15
+1002,Sam,Rivera,sam.rivera@example.com,709-555-0101,Shift Lead,Production,Facility 2,2022-09-01
+1003,Priya,Shah,,,Warehouse Associate,Shipping,Facility 3,2025-01-20
