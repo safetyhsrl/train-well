@@ -357,17 +357,13 @@
               <option value="inactive" ${f.status === "inactive" ? "selected" : ""}>Inactive</option>
               <option value="" ${f.status === "" ? "selected" : ""}>All statuses</option>
             </select>
-            <span class="spacer"></span>${bulkBtn()}<span class="muted" data-count></span>
+            <span class="spacer"></span><span class="muted" data-count></span>
           </div>
           <div class="table-wrap"><table>
-            <thead><tr>${selHead()}<th>Name</th><th>Job title</th><th>Department</th><th>Facility</th><th>Status</th><th>Mandatory training</th><th></th></tr></thead>
+            <thead><tr><th>Name</th><th>Job title</th><th>Department</th><th>Facility</th><th>Status</th><th>Mandatory training</th><th></th></tr></thead>
             <tbody data-rows></tbody></table></div>
         </div>`;
 
-      const sync = wireBulk(view, {
-        noun: "employee(s)", warn: "Their training records and attendance will also be deleted. ",
-        onDelete: (ids) => deleteIn("employees", ids)
-      });
       const draw = () => {
         const q = f.q.toLowerCase();
         const rows = all.filter((e) =>
@@ -378,13 +374,13 @@
         $("[data-count]", view).textContent = `${rows.length} of ${all.length}`;
         $("[data-rows]", view).innerHTML = rows.map((e) => {
           const g = e.status === "active" ? gaps(e) : null;
-          return `<tr>${selCell(e.id)}
+          return `<tr>
             <td><button class="link" data-view="${e.id}">${esc(fullName(e))}</button></td>
             <td>${esc(e.job_title || "—")}</td><td>${esc(e.department || "—")}</td>
             <td>${esc(facilityName(e.facility_id))}</td><td>${badge(e.status)}</td>
             <td>${g === null ? "—" : g === 0 ? badge("valid", "Up to date") : badge("expired", g + " outstanding")}</td>
             <td class="actions"><button class="link small" data-edit="${e.id}">Edit</button> ${delBtn(e.id)}</td></tr>`;
-        }).join("") || `<tr><td colspan="8" class="empty">No employees match. Add one or import a CSV.</td></tr>`;
+        }).join("") || `<tr><td colspan="7" class="empty">No employees match. Add one or import a CSV.</td></tr>`;
         $$("[data-view]", view).forEach((b) => b.onclick = () => showEmployee(Number(b.dataset.view)));
         $$("[data-edit]", view).forEach((b) => b.onclick = () => editEmployee(all.find((e) => e.id === Number(b.dataset.edit))));
         $$("[data-del]", view).forEach((b) => b.onclick = async () => {
@@ -394,7 +390,6 @@
           try { check(await sb.from("employees").delete().eq("id", e.id)); toast("Employee deleted"); route(); }
           catch (ex) { toast(ex.message, true); }
         });
-        sync();
       };
       $$("[data-f]", view).forEach((inp) => inp.addEventListener("input", () => { f[inp.dataset.f] = inp.value; draw(); }));
       draw();
