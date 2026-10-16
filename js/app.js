@@ -168,6 +168,54 @@
   // Blank-to-null for form values
   const nn = (v) => (v === undefined || v === null || String(v).trim() === "") ? null : String(v).trim();
 
+  // ---------------------------------------------------------- bulk delete
+  // Tick-box column + "Delete selected" button shared by every list page.
+  const selHead = () => `<th style="width:34px"><input type="checkbox" data-selall title="Select all shown"></th>`;
+  const selCell = (id, enabled = true) => `<td>${enabled ? `<input type="checkbox" data-sel value="${esc(id)}">` : ""}</td>`;
+  const bulkBtn = () => `<button type="button" class="danger small hidden" data-bulkdel></button>`;
+  const delBtn = (id) => `<button class="link small" data-del="${esc(id)}" style="color:var(--bad)">Delete</button>`;
+
+  async function deleteIn(table, ids) {
+    for (let i = 0; i < ids.length; i += 200) check(await sb.from(table).delete().in("id", ids.slice(i, i + 200)));
+  }
+
+  function wireBulk(view, { noun, warn = "", onDelete }) {
+    const boxes = () => $$("input[data-sel]", view);
+    const sync = () => {
+      const n = boxes().filter((b) => b.checked).length;
+      const btn = $("[data-bulkdel]", view); const all = $("[data-selall]", view);
+      if (btn) { btn.classList.toggle("hidden", !n); btn.textContent = `Delete selected (${n})`; }
+      if (all) all.checked = n > 0 && n === boxes().length;
+    };
+    view.onchange = (e) => {
+      if (e.target.matches("[data-selall]")) boxes().forEach((b) => { b.checked = e.target.checked; });
+      if (e.target.matches("[data-sel], [data-selall]")) sync();
+    };
+    const btn = $("[data-bulkdel]", view);
+    if (btn) btn.onclick = async () => {
+      const ids = boxes().filter((b) => b.checked).map((b) => b.value);
+      if (!ids.length) return;
+      if (!(await confirmBox(`Delete ${ids.length} ${noun}? ${warn}This cannot be undone.`))) return;
+      try { await onDelete(ids); toast(`Deleted ${ids.length} ${noun}`); route(); }
+      catch (ex) { toast(ex.message, true); }
+    };
+    sync();
+    return sync;
+  }
+
+  // Call a Supabase Edge Function and turn its errors into readable messages
+  async function invokeFn(name, body) {
+    const { data, error } = await sb.functions.invoke(name, { body });
+    if (error) {
+      let msg = error.message;
+      try { const j = await error.context.json(); if (j.error) msg = j.error; } catch (_) { /* keep default */ }
+      throw new Error(/Failed to send|not found|404/i.test(msg)
+        ? `Could not reach the "${name}" function. Has it been deployed in Supabase? (see README)` : msg);
+    }
+    if (data && data.error) throw new Error(data.error);
+    return data;
+  }
+
   // -------------------------------------------------------------- loaders
   async function loadLookups() {
     state.facilities = check(await sb.from("facilities").select("*").order("name"));
@@ -309,13 +357,17 @@
               <option value="inactive" ${f.status === "inactive" ? "selected" : ""}>Inactive</option>
               <option value="" ${f.status === "" ? "selected" : ""}>All statuses</option>
             </select>
-            <span class="spacer"></span><span class="muted" data-count></span>
+            <span class="spacer"></span>${bulkBtn()}<span class="muted" data-count></span>
           </div>
           <div class="table-wrap"><table>
-            <thead><tr><th>Emp #</th><th>Name</th><th>Job title</th><th>Department</th><th>Facility</th><th>Status</th><th>Mandatory training</th><th></th></tr></thead>
+            <thead><tr>${selHead()}<th>Emp #</th><th>Name</th><th>Job title</th><th>Department</th><th>Facility</th><th>Status</th><th>Mandatory training</th><th></th></tr></thead>
             <tbody data-rows></tbody></table></div>
         </div>`;
 
+      const sync = wireBulk(view, {
+        noun: "employee(s)", warn: "Their training records and attendance will also be deleted. ",
+        onDelete: (ids) => deleteIn("employees", ids)
+      });
       const draw = () => {
         const q = f.q.toLowerCase();
         const rows = all.filter((e) =>
@@ -326,16 +378,24 @@
         $("[data-count]", view).textContent = `${rows.length} of ${all.length}`;
         $("[data-rows]", view).innerHTML = rows.map((e) => {
           const g = e.status === "active" ? gaps(e) : null;
-          return `<tr>
+          return `<tr>${selCell(e.id)}
             <td>${esc(e.employee_no || "—")}</td>
             <td><button class="link" data-view="${e.id}">${esc(fullName(e))}</button></td>
             <td>${esc(e.job_title || "—")}</td><td>${esc(e.department || "—")}</td>
             <td>${esc(facilityName(e.facility_id))}</td><td>${badge(e.status)}</td>
             <td>${g === null ? "—" : g === 0 ? badge("valid", "Up to date") : badge("expired", g + " outstanding")}</td>
-            <td class="actions"><button class="link small" data-edit="${e.id}">Edit</button></td></tr>`;
-        }).join("") || `<tr><td colspan="8" class="empty">No employees match. Add one or import a CSV.</td></tr>`;
+            <td class="actions"><button class="link small" data-edit="${e.id}">Edit</button> ${delBtn(e.id)}</td></tr>`;
+        }).join("") || `<tr><td colspan="9" class="empty">No employees match. Add one or import a CSV.</td></tr>`;
         $$("[data-view]", view).forEach((b) => b.onclick = () => showEmployee(Number(b.dataset.view)));
         $$("[data-edit]", view).forEach((b) => b.onclick = () => editEmployee(all.find((e) => e.id === Number(b.dataset.edit))));
+        $$("[data-del]", view).forEach((b) => b.onclick = async () => {
+          const e = all.find((x) => x.id === Number(b.dataset.del));
+          if (!(await confirmBox(`Delete ${fullName(e)}? Their training records and attendance will also be deleted. ` +
+            `(To keep their history, Edit them and set Status to Inactive instead.)`))) return;
+          try { check(await sb.from("employees").delete().eq("id", e.id)); toast("Employee deleted"); route(); }
+          catch (ex) { toast(ex.message, true); }
+        });
+        sync();
       };
       $$("[data-f]", view).forEach((inp) => inp.addEventListener("input", () => { f[inp.dataset.f] = inp.value; draw(); }));
       draw();
@@ -489,13 +549,14 @@
               ${["valid", "expiring", "expired"].map((s) => `<option value="${s}" ${f.status === s ? "selected" : ""}>${s[0].toUpperCase() + s.slice(1)}</option>`).join("")}
             </select>
             ${isAdmin() ? `<select data-f="facility">${facilityOptions(f.facility, { includeAll: true })}</select>` : ""}
-            <span class="spacer"></span><span class="muted" data-count></span>
+            <span class="spacer"></span>${bulkBtn()}<span class="muted" data-count></span>
           </div>
           <div class="table-wrap"><table>
-            <thead><tr><th>Employee</th><th>Facility</th><th>Course</th><th>Completed</th><th>Expires</th><th>Status</th><th>Score</th><th></th></tr></thead>
+            <thead><tr>${selHead()}<th>Employee</th><th>Facility</th><th>Course</th><th>Completed</th><th>Expires</th><th>Status</th><th>Score</th><th></th></tr></thead>
             <tbody data-rows></tbody></table></div>
         </div>`;
       let shown = [];
+      const sync = wireBulk(view, { noun: "training record(s)", onDelete: (ids) => deleteIn("completions", ids) });
       const draw = () => {
         const q = f.q.toLowerCase();
         shown = recs.filter((r) =>
@@ -504,15 +565,16 @@
           (!f.status || expiryStatus(r.expires_on) === f.status) &&
           (!q || `${r.employees.first_name} ${r.employees.last_name} ${r.employees.employee_no || ""}`.toLowerCase().includes(q)));
         $("[data-count]", view).textContent = `${shown.length} records`;
-        $("[data-rows]", view).innerHTML = shown.slice(0, 500).map((r) => `<tr>
+        $("[data-rows]", view).innerHTML = shown.slice(0, 500).map((r) => `<tr>${selCell(r.id)}
           <td><button class="link" data-emp="${r.employee_id}">${esc(fullName(r.employees))}</button></td>
           <td>${esc(facilityName(r.employees.facility_id))}</td><td>${esc(courseTitle(r.course_id))}</td>
           <td>${fmtDate(r.completed_on)}</td><td>${fmtDate(r.expires_on)}</td>
           <td>${badge(expiryStatus(r.expires_on))}</td><td>${r.score ?? "—"}</td>
           <td class="actions"><button class="link small" data-edit="${r.id}">Edit</button>
             <button class="link small" data-del="${r.id}" style="color:var(--bad)">Delete</button></td></tr>`).join("")
-          + (shown.length > 500 ? `<tr><td colspan="8" class="empty">Showing first 500. Narrow the filters or export to see all.</td></tr>` : "")
-          || `<tr><td colspan="8" class="empty">No training records yet.</td></tr>`;
+          + (shown.length > 500 ? `<tr><td colspan="9" class="empty">Showing first 500. Narrow the filters or export to see all.</td></tr>` : "")
+          || `<tr><td colspan="9" class="empty">No training records yet.</td></tr>`;
+        sync();
         $$("[data-emp]", view).forEach((b) => b.onclick = () => showEmployee(Number(b.dataset.emp)));
         $$("[data-edit]", view).forEach((b) => b.onclick = () => editRecord(recs.find((r) => r.id === Number(b.dataset.edit))));
         $$("[data-del]", view).forEach((b) => b.onclick = async () => {
@@ -622,10 +684,11 @@
               <option value="upcoming" ${f.when === "upcoming" ? "selected" : ""}>Upcoming</option>
               <option value="past" ${f.when === "past" ? "selected" : ""}>Past</option></select>
             ${isAdmin() ? `<select data-f="facility">${facilityOptions(f.facility, { includeAll: true })}</select>` : ""}
+            <span class="spacer"></span>${bulkBtn()}
           </div>
           <div class="table-wrap"><table>
-            <thead><tr><th>Date</th><th>Course</th><th>Facility</th><th>Location</th><th>Trainer</th><th>Booked</th><th>Attended</th><th></th></tr></thead>
-            <tbody>${sessions.map((s) => `<tr>
+            <thead><tr>${selHead()}<th>Date</th><th>Course</th><th>Facility</th><th>Location</th><th>Trainer</th><th>Booked</th><th>Attended</th><th></th></tr></thead>
+            <tbody>${sessions.map((s) => `<tr>${selCell(s.id)}
               <td>${fmtDateTime(s.starts_at)}</td><td>${esc(courseTitle(s.course_id))}</td><td>${esc(facilityName(s.facility_id))}</td>
               <td>${esc(s.location || "—")}</td><td>${esc(s.trainer || "—")}</td>
               <td>${s.attendance.length}${s.capacity ? " / " + s.capacity : ""}</td>
@@ -633,9 +696,11 @@
               <td class="actions"><button class="link small" data-att="${s.id}">Attendance</button>
                 <button class="link small" data-edit="${s.id}">Edit</button>
                 <button class="link small" data-del="${s.id}" style="color:var(--bad)">Delete</button></td></tr>`).join("")
-              || `<tr><td colspan="8" class="empty">No ${f.when} sessions.</td></tr>`}
+              || `<tr><td colspan="9" class="empty">No ${f.when} sessions.</td></tr>`}
             </tbody></table></div>
         </div>`;
+      wireBulk(view, { noun: "session(s)", warn: "Their attendance lists are deleted too; training records already created are kept. ",
+        onDelete: (ids) => deleteIn("sessions", ids) });
       $$("[data-f]", view).forEach((inp) => inp.addEventListener("input", () => { f[inp.dataset.f] = inp.value; route(); }));
       $$("[data-att]", view).forEach((b) => b.onclick = () => manageAttendance(sessions.find((s) => s.id === Number(b.dataset.att))));
       $$("[data-edit]", view).forEach((b) => b.onclick = () => editSession(sessions.find((s) => s.id === Number(b.dataset.edit))));
@@ -696,7 +761,8 @@
             <td class="actions"><button type="button" class="link small" data-rm="${a.id}" style="color:var(--bad)">Remove</button></td></tr>`).join("")
             || `<tr><td colspan="3" class="empty">Nobody booked yet — add employees below.</td></tr>`}
         </tbody></table></div>
-        ${att.length ? `<p><button type="button" class="secondary small" data-allattended>Mark everyone attended</button></p>` : ""}
+        ${att.length ? `<p style="display:flex;gap:.5rem"><button type="button" class="secondary small" data-allattended>Mark everyone attended</button>
+          <button type="button" class="secondary small" data-rmall style="color:var(--bad)">Remove everyone</button></p>` : ""}
         <h3 style="margin-top:1.2rem">Add employees</h3>
         ${employeePicker(available, [], { facilityFilter: false })}`,
       async onSubmit(d, frm) {
@@ -712,6 +778,11 @@
     });
     wirePicker(form);
     $("[data-allattended]", form)?.addEventListener("click", () => $$("select[name^=att_]", form).forEach((sel) => sel.value = "attended"));
+    $("[data-rmall]", form)?.addEventListener("click", async () => {
+      if (!window.confirm(`Remove all ${att.length} people from this session's attendance list? Training records already created are kept.`)) return;
+      try { check(await sb.from("attendance").delete().eq("session_id", s.id)); toast("Attendance list cleared"); route(); manageAttendance(s); }
+      catch (ex) { toast(ex.message, true); }
+    });
     $$("[data-rm]", form).forEach((b) => b.onclick = async () => {
       try { check(await sb.from("attendance").delete().eq("id", Number(b.dataset.rm))); toast("Removed"); manageAttendance(s); }
       catch (ex) { toast(ex.message, true); }
@@ -726,19 +797,35 @@
       await loadLookups();
       view.innerHTML = `
         <div class="card">
-          ${isAdmin() ? "" : `<p class="muted" style="margin-top:0">Courses are managed by your administrator.</p>`}
+          ${isAdmin() ? `<div class="toolbar"><span class="spacer"></span>${bulkBtn()}</div>`
+            : `<p class="muted" style="margin-top:0">Courses are managed by your administrator.</p>`}
           <div class="table-wrap"><table>
-            <thead><tr><th>Code</th><th>Title</th><th>Category</th><th>Hours</th><th>Valid for</th><th>Mandatory</th><th>Status</th><th></th></tr></thead>
-            <tbody>${state.courses.map((c) => `<tr>
+            <thead><tr>${isAdmin() ? selHead() : ""}<th>Code</th><th>Title</th><th>Category</th><th>Hours</th><th>Valid for</th><th>Mandatory</th><th>Status</th><th></th></tr></thead>
+            <tbody>${state.courses.map((c) => `<tr>${isAdmin() ? selCell(c.id) : ""}
               <td>${esc(c.code || "—")}</td><td>${esc(c.title)}</td><td>${esc(c.category || "—")}</td>
               <td>${c.duration_hours ?? "—"}</td><td>${c.validity_months ? c.validity_months + " months" : "No expiry"}</td>
               <td>${c.mandatory ? badge("admin", "Mandatory") : badge("neutral", "Optional")}</td>
               <td>${badge(c.active ? "active" : "inactive")}</td>
-              <td class="actions">${isAdmin() ? `<button class="link small" data-edit="${c.id}">Edit</button>` : ""}</td></tr>`).join("")
-              || `<tr><td colspan="8" class="empty">No courses yet.</td></tr>`}
+              <td class="actions">${isAdmin() ? `<button class="link small" data-edit="${c.id}">Edit</button> ${delBtn(c.id)}` : ""}</td></tr>`).join("")
+              || `<tr><td colspan="9" class="empty">No courses yet.</td></tr>`}
             </tbody></table></div>
         </div>`;
       $$("[data-edit]", view).forEach((b) => b.onclick = () => editCourse(state.courses.find((c) => c.id === Number(b.dataset.edit))));
+      if (isAdmin()) wireBulk(view, { noun: "course(s)",
+        warn: "Every training record and session for these courses will also be deleted. ",
+        onDelete: (ids) => deleteIn("courses", ids) });
+      $$("[data-del]", view).forEach((b) => b.onclick = async () => {
+        const c = state.courses.find((x) => x.id === Number(b.dataset.del));
+        try {
+          const n = async (t) => (await sb.from(t).select("id", { count: "exact", head: true }).eq("course_id", c.id)).count || 0;
+          const [nRec, nSess] = await Promise.all([n("completions"), n("sessions")]);
+          const warn = nRec + nSess
+            ? `This also deletes ${nRec} training record(s) and ${nSess} session(s) for this course. To keep that history, Edit the course and untick Active instead.`
+            : "No training records or sessions use it.";
+          if (!(await confirmBox(`Delete the course "${c.title}"? ${warn}`))) return;
+          check(await sb.from("courses").delete().eq("id", c.id)); toast("Course deleted"); route();
+        } catch (ex) { toast(ex.message, true); }
+      });
       this.onAction = (act) => { if (act === "add") editCourse(null); };
     }
   };
@@ -778,17 +865,28 @@
         <div class="card">
           <p class="muted" style="margin-top:0"><strong>Admins</strong> see and manage all facilities, courses and users.
             <strong>Managers</strong> see only their own facility's employees, sessions and records.</p>
+          <div class="toolbar"><span class="spacer"></span>${bulkBtn()}</div>
           <div class="table-wrap"><table>
-            <thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Facility</th><th>Status</th><th></th></tr></thead>
-            <tbody>${users.map((u) => `<tr>
+            <thead><tr>${selHead()}<th>Name</th><th>Email</th><th>Role</th><th>Facility</th><th>Status</th><th></th></tr></thead>
+            <tbody>${users.map((u) => `<tr>${selCell(u.id, u.id !== state.me.id)}
               <td>${esc(u.full_name)}${u.id === state.me.id ? ' <span class="muted">(you)</span>' : ""}</td><td>${esc(u.email)}</td>
               <td>${badge(u.role)}</td><td>${u.role === "admin" ? "All" : esc(facilityName(u.facility_id))}</td>
               <td>${badge(u.active ? "active" : "inactive")}</td>
               <td class="actions"><button class="link small" data-reset="${u.id}">Send password reset</button>
-                <button class="link small" data-edit="${u.id}">Edit</button></td></tr>`).join("")}
+                <button class="link small" data-edit="${u.id}">Edit</button>
+                ${u.id === state.me.id ? "" : delBtn(u.id)}</td></tr>`).join("")}
             </tbody></table></div>
         </div>`;
       $$("[data-edit]", view).forEach((b) => b.onclick = () => editUser(users.find((u) => u.id === b.dataset.edit)));
+      wireBulk(view, { noun: "user login(s)", warn: "They will no longer be able to sign in. ",
+        onDelete: (ids) => invokeFn("delete-user", { ids }) });
+      $$("[data-del]", view).forEach((b) => b.onclick = async () => {
+        const u = users.find((x) => x.id === b.dataset.del);
+        if (!(await confirmBox(`Delete the login for ${u.full_name} (${u.email})? They will no longer be able to sign in. ` +
+          `Employees and training records are not affected.`))) return;
+        try { await invokeFn("delete-user", { ids: [u.id] }); toast("User deleted"); route(); }
+        catch (ex) { toast(ex.message, true); }
+      });
       $$("[data-reset]", view).forEach((b) => b.onclick = async () => {
         const u = users.find((x) => x.id === b.dataset.reset);
         const redirectTo = location.href.split("#")[0].replace(/[^/]*$/, "") + "index.html";
@@ -978,7 +1076,7 @@
   });
   $("#menuBtn").addEventListener("click", () => $("#sidebar").classList.toggle("open"));
   $("#logoutBtn").addEventListener("click", async () => { await sb.auth.signOut(); location.replace("index.html"); });
-  window.addEventListener("hashchange", route);
+  window.addEventListener("hashchange", () => { $("#modalRoot").innerHTML = ""; route(); });
 
   // ============================================================== BOOT
   (async function boot() {
