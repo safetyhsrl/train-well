@@ -884,9 +884,12 @@
             <td><strong>${esc(f.name)}</strong></td><td>${esc(f.address || "—")}</td>
             <td>${emps.filter((e) => e.facility_id === f.id).length}</td>
             <td>${users.filter((u) => u.facility_id === f.id && u.role === "manager" && u.active).length}</td>
-            <td class="actions"><button class="link small" data-edit="${f.id}">Edit</button></td></tr>`).join("")}
+            <td class="actions"><button class="link small" data-edit="${f.id}">Edit</button>
+              <button class="link small" data-del="${f.id}" style="color:var(--bad)">Delete</button></td></tr>`).join("")
+            || `<tr><td colspan="5" class="empty">No facilities yet.</td></tr>`}
           </tbody></table></div></div>`;
       $$("[data-edit]", view).forEach((b) => b.onclick = () => editFacility(state.facilities.find((f) => f.id === Number(b.dataset.edit))));
+      $$("[data-del]", view).forEach((b) => b.onclick = () => deleteFacility(state.facilities.find((f) => f.id === Number(b.dataset.del))));
       this.onAction = (act) => { if (act === "add") editFacility(null); };
     }
   };
@@ -903,6 +906,50 @@
         if (isNew) check(await sb.from("facilities").insert(row));
         else check(await sb.from("facilities").update(row).eq("id", f.id));
         await loadLookups(); toast("Facility saved"); route();
+      }
+    });
+  }
+
+  // Delete a facility. If it still has employees, sessions or managers,
+  // they must be moved to another facility first so nothing is lost.
+  async function deleteFacility(f) {
+    const count = async (table) => {
+      const { count: n, error } = await sb.from(table).select("id", { count: "exact", head: true }).eq("facility_id", f.id);
+      if (error) throw new Error(error.message);
+      return n || 0;
+    };
+    let nEmp, nSess, nMgr;
+    try { [nEmp, nSess, nMgr] = await Promise.all([count("employees"), count("sessions"), count("profiles")]); }
+    catch (ex) { toast(ex.message, true); return; }
+    const others = state.facilities.filter((x) => x.id !== f.id);
+    const inUse = nEmp + nSess + nMgr > 0;
+
+    if (inUse && !others.length) {
+      openModal({ title: `Delete ${f.name}`, body: `<p>This facility still has ${nEmp} employee(s), ${nSess} session(s) and ${nMgr} manager(s).
+        Add another facility first so they can be moved there, then delete this one.</p>` });
+      return;
+    }
+
+    openModal({
+      title: `Delete ${f.name}`, submitText: "Delete facility",
+      body: inUse ? `
+        <p>This facility still has <strong>${nEmp}</strong> employee(s) (active and inactive), <strong>${nSess}</strong> session(s)
+          and <strong>${nMgr}</strong> manager login(s). They'll be moved to the facility you choose, with all their training records kept.</p>
+        <div class="field"><label>Move everything to *</label>
+          <select name="target" required>${others.map((o) => `<option value="${o.id}">${esc(o.name)}</option>`).join("")}</select></div>
+        <div class="field"><label>Type <strong>DELETE</strong> to confirm</label><input name="confirm" required autocomplete="off"></div>`
+        : `<p>This facility has no employees, sessions or managers.</p>
+        <div class="field"><label>Type <strong>DELETE</strong> to confirm</label><input name="confirm" required autocomplete="off"></div>`,
+      async onSubmit(d) {
+        if (d.confirm.trim().toUpperCase() !== "DELETE") throw new Error("Type DELETE to confirm.");
+        if (inUse) {
+          const target = Number(d.target);
+          check(await sb.from("employees").update({ facility_id: target }).eq("facility_id", f.id));
+          check(await sb.from("sessions").update({ facility_id: target }).eq("facility_id", f.id));
+          check(await sb.from("profiles").update({ facility_id: target }).eq("facility_id", f.id));
+        }
+        check(await sb.from("facilities").delete().eq("id", f.id));
+        await loadLookups(); toast(`${f.name} deleted`); route();
       }
     });
   }
