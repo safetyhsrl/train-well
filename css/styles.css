@@ -127,6 +127,7 @@ td.actions { text-align: right; }
 .badge.expired, .badge.missing, .badge.inactive, .badge.absent { background: var(--bad-bg); color: var(--bad); }
 .badge.admin { background: var(--brand-soft); color: var(--brand-dark); }
 .badge.manager, .badge.neutral { background: #eef1f0; color: var(--muted); }
+.badge.employee { background: var(--warn-bg); color: var(--warn); }
 
 .bar { height: 8px; background: #eef1f0; border-radius: 99px; overflow: hidden; }
 .bar > span { display: block; height: 100%; background: var(--ok); }
