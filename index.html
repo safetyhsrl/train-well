@@ -3,44 +3,111 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#01452a">
+  <meta name="description" content="Train Well: staff training, certificates and fire drill records for our care homes.">
   <title>Sign in · Train Well</title>
+  <link rel="icon" type="image/png" href="img/favicon.png">
+  <link rel="apple-touch-icon" href="img/logo.png">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Figtree:wght@400;500;600;700&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="css/styles.css">
-  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='7' fill='%230f5e5a'/><text x='16' y='22' font-size='15' font-family='Arial' font-weight='bold' fill='white' text-anchor='middle'>TW</text></svg>">
 </head>
-<body>
-  <div class="login-wrap">
-    <form class="login-card" id="loginForm" autocomplete="on">
-      <div class="logo"><span class="logo-mark">TW</span> Train Well</div>
-      <h1>Sign in</h1>
-      <p class="muted" style="margin-top:0">Managers and staff: sign in with your email and password.</p>
-
-      <div id="msg" class="alert hidden"></div>
-
-      <div class="field">
-        <label for="email">Email</label>
-        <input id="email" type="email" required autocomplete="username">
+<body class="auth-page">
+  <main class="auth">
+    <!-- Brand side -->
+    <section class="auth-brand" aria-label="Train Well">
+      <div class="auth-brand-inner">
+        <div class="brand-lockup">
+          <span class="brand-tile"><img src="img/logo.png" alt="" width="56" height="56"></span>
+          <span class="brand-name">Train Well</span>
+        </div>
+        <h2 class="auth-headline">Staff training for our homes, kept in one place.</h2>
+        <ul class="auth-points">
+          <li>See who's due before a certificate lapses</li>
+          <li>Staff upload their own certificates from a phone</li>
+          <li>Fire drill reports, ready to print</li>
+        </ul>
       </div>
-      <div class="field">
-        <label for="password">Password</label>
-        <input id="password" type="password" required autocomplete="current-password">
-      </div>
-      <button type="submit" id="loginBtn">Sign in</button>
-      <p style="text-align:center;margin:1rem 0 0">
-        <button type="button" class="link" id="forgotBtn">Forgot password?</button>
-      </p>
-    </form>
+      <svg class="auth-waves" viewBox="0 0 800 220" preserveAspectRatio="none" aria-hidden="true">
+        <path class="w1" d="M0,120 C140,70 260,170 420,120 C560,76 680,92 800,130 L800,220 L0,220 Z"/>
+        <path class="w2" d="M0,150 C160,110 300,196 460,152 C600,114 700,138 800,160 L800,220 L0,220 Z"/>
+        <path class="w3" d="M0,186 C170,160 320,214 500,184 C640,162 730,176 800,190 L800,220 L0,220 Z"/>
+      </svg>
+    </section>
 
-    <form class="login-card hidden" id="resetForm">
-      <div class="logo"><span class="logo-mark">TW</span> Train Well</div>
-      <h1>Set a new password</h1>
-      <div id="resetMsg" class="alert hidden"></div>
-      <div class="field">
-        <label for="newPassword">New password (min 8 characters)</label>
-        <input id="newPassword" type="password" minlength="8" required autocomplete="new-password">
+    <!-- Form side -->
+    <section class="auth-panel">
+      <div class="auth-card">
+        <div class="brand-lockup brand-lockup--mobile">
+          <span class="brand-tile"><img src="img/logo.png" alt="" width="44" height="44"></span>
+          <span class="brand-name">Train Well</span>
+        </div>
+
+        <!-- Sign in -->
+        <form id="loginForm" novalidate>
+          <h1>Sign in</h1>
+          <p class="auth-sub">Use the email address your administrator set up for you.</p>
+
+          <div id="msg" class="alert hidden" role="alert"></div>
+
+          <div class="field">
+            <label for="email">Email</label>
+            <input id="email" type="email" required autocomplete="username" inputmode="email" autocapitalize="off" spellcheck="false">
+          </div>
+
+          <div class="field">
+            <div class="label-row">
+              <label for="password">Password</label>
+              <button type="button" class="link" id="forgotBtn">Forgot password?</button>
+            </div>
+            <div class="pw-wrap">
+              <input id="password" type="password" required autocomplete="current-password">
+              <button type="button" class="pw-toggle" data-toggle="password" aria-label="Show password" aria-pressed="false">Show</button>
+            </div>
+            <p class="caps-hint hidden" data-caps="password">Caps Lock is on</p>
+          </div>
+
+          <label class="check">
+            <input type="checkbox" id="remember"> Remember my email on this device
+          </label>
+
+          <button type="submit" id="loginBtn" class="btn-primary">
+            <span class="btn-label">Sign in</span><span class="spinner" aria-hidden="true"></span>
+          </button>
+
+          <p class="auth-foot">Trouble signing in? Ask your manager or administrator.</p>
+        </form>
+
+        <!-- Set a new password (from an invite or reset email) -->
+        <form id="resetForm" class="hidden" novalidate>
+          <h1>Set your password</h1>
+          <p class="auth-sub">Choose a password you'll use to sign in to Train Well.</p>
+
+          <div id="resetMsg" class="alert hidden" role="alert"></div>
+
+          <div class="field">
+            <label for="newPassword">New password</label>
+            <div class="pw-wrap">
+              <input id="newPassword" type="password" minlength="8" required autocomplete="new-password" aria-describedby="pwRule">
+              <button type="button" class="pw-toggle" data-toggle="newPassword" aria-label="Show password" aria-pressed="false">Show</button>
+            </div>
+            <p class="field-hint" id="pwRule">At least 8 characters.</p>
+            <p class="caps-hint hidden" data-caps="newPassword">Caps Lock is on</p>
+          </div>
+
+          <div class="field">
+            <label for="confirmPassword">Confirm password</label>
+            <input id="confirmPassword" type="password" minlength="8" required autocomplete="new-password">
+          </div>
+
+          <button type="submit" id="resetBtn" class="btn-primary">
+            <span class="btn-label">Save password and sign in</span><span class="spinner" aria-hidden="true"></span>
+          </button>
+        </form>
       </div>
-      <button type="submit">Save password</button>
-    </form>
-  </div>
+    </section>
+  </main>
 
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
   <script src="js/config.js"></script>
