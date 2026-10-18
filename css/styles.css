@@ -144,3 +144,12 @@ td.actions { text-align: right; }
 #toast { position: fixed; bottom: 1.2rem; right: 1.2rem; background: var(--text); color: #fff; padding: .7rem 1rem;
   border-radius: 8px; z-index: 60; box-shadow: var(--shadow); max-width: 360px; }
 #toast.error { background: var(--bad); }
+
+/* ---------- Fire drills ---------- */
+.choices { display: flex; flex-wrap: wrap; gap: .5rem 1.4rem; }
+.choices.stacked { flex-direction: column; gap: .4rem; }
+label.choice { display: flex; align-items: center; gap: .45rem; font-weight: 400; color: var(--text); margin: 0; cursor: pointer; }
+label.choice input { width: auto; margin: 0; }
+.qtable td:first-child { white-space: normal; }
+.qtable td:not(:first-child), .qtable th:not(:first-child) { text-align: center; width: 4rem; }
+.qtable input[type=radio] { width: 1.05rem; height: 1.05rem; cursor: pointer; }
