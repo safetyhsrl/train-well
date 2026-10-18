@@ -90,6 +90,94 @@
     a.download = filename; a.click(); URL.revokeObjectURL(a.href);
   }
 
+  // ---------------------------------------------------------- Excel export
+  // SheetJS is loaded only when someone downloads, so normal pages stay fast.
+  let xlsxLoading = null;
+  function loadXLSX() {
+    if (window.XLSX) return Promise.resolve(window.XLSX);
+    if (!xlsxLoading) xlsxLoading = new Promise((resolve, reject) => {
+      const sc = document.createElement("script");
+      sc.src = "https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js";
+      sc.onload = () => resolve(window.XLSX);
+      sc.onerror = () => { xlsxLoading = null; reject(new Error("Could not load the Excel library. Check your internet connection and try again.")); };
+      document.head.appendChild(sc);
+    });
+    return xlsxLoading;
+  }
+  // Dates go in as real Excel dates (serial numbers) so they never shift a day with time zones
+  const toDate = (v) => {
+    if (!v) return null;
+    const [y, m, d] = String(v).slice(0, 10).split("-").map(Number);
+    return { t: "n", v: (Date.UTC(y, m - 1, d) - Date.UTC(1899, 11, 30)) / 86400000, z: "yyyy-mm-dd" };
+  };
+  function sheetFrom(XLSX, rows, widths) {
+    const ws = XLSX.utils.aoa_to_sheet(rows);
+    ws["!cols"] = (widths || rows[0].map((h) => Math.max(12, String(h).length + 2))).map((w) => ({ wch: w }));
+    if (rows.length > 1) ws["!autofilter"] = { ref: XLSX.utils.encode_range({ s: { r: 0, c: 0 }, e: { r: rows.length - 1, c: rows[0].length - 1 } }) };
+    ws["!freeze"] = { xSplit: 0, ySplit: 1 };
+    return ws;
+  }
+  async function downloadXLSX(filename, sheetName, rows) {
+    const XLSX = await loadXLSX();
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, sheetFrom(XLSX, rows), sheetName);
+    XLSX.writeFile(wb, filename);
+  }
+
+  const STATUS_LABEL = { valid: "Up to date", expiring: "Due soon", expired: "Overdue", missing: "Missing" };
+
+  // Training records workbook: a matrix (people x courses, like the paper report) + the full list
+  async function downloadTrainingExcel(facilityFilter, records) {
+    toast("Preparing Excel file…");
+    const XLSX = await loadXLSX();
+    const facId = facilityFilter ? Number(facilityFilter) : null;
+    const employees = (await loadEmployees({ activeOnly: true })).filter((e) => !facId || e.facility_id === facId);
+    const status = await fetchAll(() => sb.from("training_status").select("*"));
+    const map = new Map(status.map((s) => [`${s.employee_id}:${s.course_id}`, s]));
+    const courses = state.courses.filter((c) => c.active);
+
+    // Sheet 1: matrix
+    const head = ["Employee", "Facility", "Job title", ...courses.map((c) => c.title + (c.mandatory ? "" : " (optional)"))];
+    const matrix = [head];
+    for (const e of employees) {
+      const row = [`${e.last_name}, ${e.first_name}`, facilityName(e.facility_id), e.job_title || ""];
+      for (const c of courses) {
+        const s = map.get(`${e.id}:${c.id}`);
+        if (!s) { row.push(c.mandatory ? "Missing" : ""); continue; }
+        const label = STATUS_LABEL[expiryStatus(s.expires_on)];
+        row.push(s.expires_on ? `${label} (${s.expires_on})` : label);
+      }
+      matrix.push(row);
+    }
+    // Totals per course
+    matrix.push([]);
+    for (const key of ["valid", "expiring", "expired", "missing"]) {
+      const row = [STATUS_LABEL[key], "", ""];
+      for (const c of courses) {
+        row.push(employees.filter((e) => {
+          const s = map.get(`${e.id}:${c.id}`);
+          return key === "missing" ? (!s && c.mandatory) : (s && expiryStatus(s.expires_on) === key);
+        }).length);
+      }
+      matrix.push(row);
+    }
+    const mWs = sheetFrom(XLSX, matrix, [26, 24, 18, ...courses.map(() => 24)]);
+    mWs["!autofilter"] = { ref: XLSX.utils.encode_range({ s: { r: 0, c: 0 }, e: { r: employees.length, c: head.length - 1 } }) };
+
+    // Sheet 2: every record currently shown on the page
+    const list = [["Employee", "Facility", "Course", "Completed", "Expires", "Status", "Score", "Certificate #", "Notes"]];
+    for (const r of records) list.push([
+      `${r.employees.last_name}, ${r.employees.first_name}`, facilityName(r.employees.facility_id), courseTitle(r.course_id),
+      toDate(r.completed_on), toDate(r.expires_on), STATUS_LABEL[expiryStatus(r.expires_on)],
+      r.score ?? "", r.certificate_no || "", r.notes || ""]);
+
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, mWs, "Training matrix");
+    XLSX.utils.book_append_sheet(wb, sheetFrom(XLSX, list, [26, 24, 34, 12, 12, 12, 8, 14, 50]), "All records");
+    const facPart = facId ? "-" + facilityName(facId).replace(/[^A-Za-z0-9]+/g, "-") : "";
+    XLSX.writeFile(wb, `TrainWell-training${facPart}-${todayISO()}.xlsx`);
+  }
+
   function parseCSV(text) {
     const rows = []; let row = []; let cur = ""; let q = false;
     text = text.replace(/^﻿/, "");
@@ -260,6 +348,19 @@
       const { items } = await complianceMatrix(employees);
       const upcoming = check(await sb.from("sessions").select("*, attendance(count)")
         .gte("starts_at", new Date().toISOString()).order("starts_at").limit(8));
+      // Fire drills: last drill per home (the card hides itself if drills aren't set up yet)
+      const { data: drillRows, error: drillErr } = await sb.from("fire_drills")
+        .select("id, facility_id, drill_date, event_type, q_meeting_area, q_fire_doors, q_windows_doors, q_staff_response, q_corridors_clear, q_pull_stations")
+        .order("drill_date", { ascending: false });
+      const thisYear = todayISO().slice(0, 4);
+      const drillByFac = drillErr ? [] : state.facilities
+        .filter((f) => isAdmin() || f.id === state.me.facility_id)
+        .map((f) => {
+          const ds = drillRows.filter((x) => x.facility_id === f.id);
+          const last = ds[0];
+          return { f, last, year: ds.filter((x) => x.drill_date.startsWith(thisYear)).length,
+            days: last ? Math.round((new Date(todayISO()) - new Date(last.drill_date)) / 86400000) : null };
+        });
 
       const count = (s) => items.filter((i) => i.status === s).length;
       const okCount = count("valid") + count("expiring");
@@ -299,6 +400,21 @@
             </tbody></table></div>
         </div>
 
+        ${drillErr ? "" : `
+        <div class="card">
+          <div style="display:flex;justify-content:space-between;align-items:center;gap:1rem;flex-wrap:wrap">
+            <h2 style="margin:0">Fire drills</h2><a href="#drills">Open Fire Drilling →</a></div>
+          <div class="table-wrap" style="margin-top:.6rem"><table>
+            <thead><tr><th>Home</th><th>Last drill</th><th>Days since</th><th>Last outcome</th><th>Drills in ${thisYear}</th></tr></thead>
+            <tbody>${drillByFac.map((r) => `
+              <tr><td>${esc(r.f.name)}</td>
+                <td>${r.last ? fmtDate(r.last.drill_date) + (r.last.event_type === "alarm" ? " (alarm)" : "") : badge("missing", "None recorded")}</td>
+                <td>${r.days == null ? "—" : r.days}</td>
+                <td>${r.last ? (drillIssues(r.last) ? badge("expired", drillIssues(r.last) + (drillIssues(r.last) > 1 ? " issues" : " issue")) : badge("valid", "No issues")) : "—"}</td>
+                <td>${r.year}</td></tr>`).join("") || `<tr><td colspan="5" class="empty">No facilities yet.</td></tr>`}
+            </tbody></table></div>
+        </div>`}
+
         <div class="cols">
           <div class="card">
             <h2>Needs attention</h2>
@@ -333,7 +449,7 @@
     filters: { q: "", facility: "", status: "active" },
     actions() {
       return `<button class="secondary" data-act="import">Import CSV</button>
-              <button class="secondary" data-act="export">Export CSV</button>
+              <button class="secondary" data-act="export">Download Excel</button>
               <button data-act="add">+ Add employee</button>`;
     },
     async render(view) {
@@ -397,11 +513,11 @@
       this.onAction = (act) => {
         if (act === "add") editEmployee(null);
         if (act === "import") importEmployees();
-        if (act === "export") downloadCSV(`trainwell-employees-${todayISO()}.csv`, [
-          ["first_name", "last_name", "email", "phone", "job_title", "department", "facility", "hire_date", "status"],
-          ...all.map((e) => [e.first_name, e.last_name, e.email, e.phone, e.job_title, e.department,
-            facilityName(e.facility_id), e.hire_date, e.status])
-        ]);
+        if (act === "export") downloadXLSX(`TrainWell-employees-${todayISO()}.xlsx`, "Employees", [
+          ["First name", "Last name", "Email", "Phone", "Job title", "Department", "Facility", "Hire date", "Status"],
+          ...all.map((e) => [e.first_name, e.last_name, e.email || "", e.phone || "", e.job_title || "", e.department || "",
+            facilityName(e.facility_id), toDate(e.hire_date), e.status])
+        ]).catch((ex) => toast(ex.message, true));
       };
     }
   };
@@ -525,7 +641,7 @@
     title: "Training records",
     filters: { q: "", course: "", status: "", facility: "" },
     actions() {
-      return `<button class="secondary" data-act="export">Export CSV</button>
+      return `<button class="secondary" data-act="excel">Download Excel</button>
               <button data-act="add">+ Record training</button>`;
     },
     async render(view) {
@@ -581,20 +697,16 @@
       draw();
       this.onAction = (act) => {
         if (act === "add") editRecord(null);
-        if (act === "export") downloadCSV(`trainwell-training-records-${todayISO()}.csv`, [
-          ["employee", "facility", "course", "completed_on", "expires_on", "status", "score", "certificate_no", "notes"],
-          ...shown.map((r) => [fullName(r.employees), facilityName(r.employees.facility_id),
-            courseTitle(r.course_id), r.completed_on, r.expires_on, expiryStatus(r.expires_on), r.score, r.certificate_no, r.notes])
-        ]);
+        if (act === "excel") downloadTrainingExcel(f.facility, shown).catch((ex) => toast(ex.message, true));
       };
     }
   };
 
   // Employee checklist picker (used for records and attendance)
-  function employeePicker(employees, selectedIds = [], { facilityFilter = true } = {}) {
+  function employeePicker(employees, selectedIds = [], { facilityFilter = true, label = "Employees *" } = {}) {
     const sel = new Set(selectedIds);
     return `
-      <div class="field"><label>Employees * <span data-selcount class="muted"></span></label>
+      <div class="field"><label>${esc(label)} <span data-selcount class="muted"></span></label>
         <div class="toolbar" style="margin-bottom:.4rem">
           <input type="search" placeholder="Filter…" data-pick-filter style="flex:1">
           ${isAdmin() && facilityFilter ? `<select data-pick-fac>${facilityOptions("", { includeAll: true })}</select>` : ""}
@@ -781,6 +893,313 @@
       try { check(await sb.from("attendance").delete().eq("id", Number(b.dataset.rm))); toast("Removed"); manageAttendance(s); }
       catch (ex) { toast(ex.message, true); }
     });
+  }
+
+  // -------------------------------------------------------- fire drills
+  // Based on the paper "Fire Drill Report" form (resident checklist page left out on purpose).
+  const DRILL_QUESTIONS = [
+    ["q_meeting_area", "Did all residents/people proceed to predetermined meeting area?"],
+    ["q_fire_doors", "Did fire doors close as expected?"],
+    ["q_windows_doors", "Were all windows and doors closed?"],
+    ["q_staff_response", "Did all staff respond effectively and timely?"],
+    ["q_corridors_clear", "Were all corridors free from obstruction?"],
+    ["q_pull_stations", "Were all pull stations and extinguishers easily accessible?"],
+    ["q_fire_dept_called", "Was the Fire Department called?"],
+    ["q_extinguishing", "Was fire extinguishing necessary?"]
+  ];
+  // A "No" on these six is a problem to follow up; the last two are just information.
+  const DRILL_PROBLEM_QS = DRILL_QUESTIONS.slice(0, 6).map((q) => q[0]);
+  const DRILL_TYPE = { drill: "Fire drill (planned)", alarm: "Fire alarm (unplanned)" };
+  const DRILL_ACTIVITY = {
+    staff_only: "Staff only participated",
+    full: "Residents and staff (full drill – residents moved to central meeting area)",
+    info_session: "Residents and staff information/discussion session"
+  };
+  const ANSWER = { yes: "Yes", no: "No", na: "N/A" };
+  const hhmm = (t) => (t ? String(t).slice(0, 5) : "");
+  function drillMinutes(d) {
+    if (!d.start_time || !d.end_time) return null;
+    const [a, b] = hhmm(d.start_time).split(":").map(Number);
+    const [c, e] = hhmm(d.end_time).split(":").map(Number);
+    let m = (c * 60 + e) - (a * 60 + b);
+    if (m < 0) m += 1440; // ran past midnight
+    return m;
+  }
+  const fmtMinutes = (m) => (m == null ? "—" : m >= 60 ? `${Math.floor(m / 60)} h ${m % 60} min` : `${m} min`);
+  const drillIssues = (d) => DRILL_PROBLEM_QS.filter((k) => d[k] === "no").length;
+  const drillNotSetUp = (error) =>
+    `<div class="card"><h2>Fire Drilling isn't set up yet</h2>
+      <p>An administrator needs to run <code>supabase/update-2026-10-fire-drills.sql</code> once in the Supabase SQL Editor (see README).</p>
+      <p class="muted" style="font-size:.85rem">${esc(error.message)}</p></div>`;
+
+  async function loadDrill(id) {
+    return check(await sb.from("fire_drills").select("*, fire_drill_participants(*)").eq("id", id).single());
+  }
+
+  views.drills = {
+    title: "Fire Drilling",
+    filters: { facility: "", year: "" },
+    actions() {
+      return `<button class="secondary" data-act="excel">Download Excel</button>
+              <button data-act="add">+ Record fire drill</button>`;
+    },
+    async render(view) {
+      const f = this.filters;
+      let q = sb.from("fire_drills").select("*, fire_drill_participants(count)")
+        .order("drill_date", { ascending: false }).order("start_time", { ascending: false, nullsFirst: false });
+      if (f.facility) q = q.eq("facility_id", Number(f.facility));
+      const { data, error } = await q;
+      if (error) {
+        view.innerHTML = drillNotSetUp(error);
+        this.onAction = () => toast("Fire Drilling isn't set up yet. See the message on the page.", true);
+        return;
+      }
+      const years = [...new Set(data.map((d) => d.drill_date.slice(0, 4)))].sort().reverse();
+      const drills = data.filter((d) => !f.year || d.drill_date.startsWith(f.year));
+      view.innerHTML = `
+        <div class="card">
+          <div class="toolbar">
+            ${isAdmin() ? `<select data-f="facility">${facilityOptions(f.facility, { includeAll: true })}</select>` : ""}
+            <select data-f="year"><option value="">All years</option>
+              ${years.map((y) => `<option value="${y}" ${f.year === y ? "selected" : ""}>${y}</option>`).join("")}</select>
+            <span class="spacer"></span><span class="muted">${drills.length} report${drills.length === 1 ? "" : "s"}</span>
+          </div>
+          <div class="table-wrap"><table>
+            <thead><tr><th>Date</th><th>Home</th><th>Type</th><th>Time</th><th>Total</th><th>Participants</th><th>Outcome</th><th>Coordinator</th><th></th></tr></thead>
+            <tbody>${drills.map((d) => {
+              const n = drillIssues(d);
+              return `<tr>
+                <td><button class="link" data-view="${d.id}">${fmtDate(d.drill_date)}</button></td>
+                <td>${esc(facilityName(d.facility_id))}</td>
+                <td>${d.event_type === "alarm" ? badge("expiring", "Fire alarm") : badge("neutral", "Fire drill")}</td>
+                <td>${hhmm(d.start_time) || "—"}${d.end_time ? "–" + hhmm(d.end_time) : ""}</td>
+                <td>${fmtMinutes(drillMinutes(d))}</td>
+                <td>${d.fire_drill_participants[0]?.count ?? 0}</td>
+                <td>${n ? badge("expired", n + (n > 1 ? " issues" : " issue")) : badge("valid", "No issues")}</td>
+                <td>${esc(d.coordinator || "—")}</td>
+                <td class="actions"><button class="link small" data-print="${d.id}">Print</button>
+                  <button class="link small" data-edit="${d.id}">Edit</button> ${delBtn(d.id)}</td></tr>`;
+            }).join("") || `<tr><td colspan="9" class="empty">No fire drills recorded yet. Click <strong>+ Record fire drill</strong> to add one.</td></tr>`}
+            </tbody></table></div>
+        </div>`;
+      $$("[data-f]", view).forEach((inp) => inp.addEventListener("input", () => { f[inp.dataset.f] = inp.value; route(); }));
+      $$("[data-view]", view).forEach((b) => b.onclick = () => showDrill(Number(b.dataset.view)));
+      $$("[data-print]", view).forEach((b) => b.onclick = () => printDrill(Number(b.dataset.print)));
+      $$("[data-edit]", view).forEach((b) => b.onclick = () => editDrill(Number(b.dataset.edit)));
+      $$("[data-del]", view).forEach((b) => b.onclick = async () => {
+        const d = drills.find((x) => x.id === Number(b.dataset.del));
+        if (!(await confirmBox(`Delete the fire drill report for ${facilityName(d.facility_id)} on ${fmtDate(d.drill_date)}? This cannot be undone.`))) return;
+        try { check(await sb.from("fire_drills").delete().eq("id", d.id)); toast("Fire drill report deleted"); route(); }
+        catch (ex) { toast(ex.message, true); }
+      });
+      this.onAction = (act) => {
+        if (act === "add") editDrill(null);
+        if (act === "excel") downloadDrillsExcel(drills).catch((ex) => toast(ex.message, true));
+      };
+    }
+  };
+
+  async function editDrill(id) {
+    let d = { facility_id: state.me.facility_id || state.facilities[0]?.id, drill_date: todayISO(), event_type: "drill", fire_drill_participants: [] };
+    let allEmps;
+    try {
+      if (id) d = await loadDrill(id);
+      allEmps = await loadEmployees({ activeOnly: true });
+    } catch (ex) { toast(ex.message, true); return; }
+    const isNew = !id;
+    const known = new Set(allEmps.map((e) => e.id));
+    let picked = new Set(d.fire_drill_participants.filter((p) => p.employee_id && known.has(p.employee_id)).map((p) => p.employee_id));
+    // Names typed in by hand, plus anyone no longer on the active employee list, stay as plain names
+    const others = d.fire_drill_participants.filter((p) => !p.employee_id || !known.has(p.employee_id)).map((p) => p.name).join("\n");
+    const radio = (name, value, label, cur) =>
+      `<label class="choice"><input type="radio" name="${name}" value="${value}" ${cur === value ? "checked" : ""}> ${esc(label)}</label>`;
+
+    const { form } = openModal({
+      title: isNew ? "Record fire drill" : "Edit fire drill report", wide: true, submitText: "Save report",
+      body: `
+        <div class="grid2">
+          <div class="field"><label>Name of home *</label>
+            <select name="facility_id" required data-fac ${isAdmin() ? "" : "disabled"}>${facilityOptions(d.facility_id)}</select></div>
+          <div class="field"><label>Date of drill *</label><input type="date" name="drill_date" required value="${esc(d.drill_date)}"></div>
+          <div class="field"><label>Start time</label><input type="time" name="start_time" value="${hhmm(d.start_time)}" data-t></div>
+          <div class="field"><label>Completion time</label><input type="time" name="end_time" value="${hhmm(d.end_time)}" data-t></div>
+        </div>
+        <p class="muted" style="margin:-.3rem 0 .9rem">Total time: <strong data-total>${fmtMinutes(drillMinutes(d))}</strong></p>
+        <div class="field"><label>Type of event *</label>
+          <div class="choices">${radio("event_type", "drill", DRILL_TYPE.drill, d.event_type)}${radio("event_type", "alarm", DRILL_TYPE.alarm, d.event_type)}</div></div>
+        <div class="field" data-actfield><label>If fire drill, activities of the drill</label>
+          <div class="choices stacked">${Object.entries(DRILL_ACTIVITY).map(([k, v]) => radio("activity", k, v, d.activity)).join("")}</div></div>
+        <h3 style="margin-top:1rem">Outcome of fire event</h3>
+        <div class="table-wrap"><table class="qtable">
+          <thead><tr><th></th><th>Yes</th><th>No</th><th>N/A</th></tr></thead>
+          <tbody>${DRILL_QUESTIONS.map(([k, label]) => `<tr><td>${esc(label)}</td>${["yes", "no", "na"].map((v) =>
+            `<td><input type="radio" name="${k}" value="${v}" ${d[k] === v ? "checked" : ""} aria-label="${esc(label)} ${ANSWER[v]}"></td>`).join("")}</tr>`).join("")}
+          </tbody></table></div>
+        <div class="field" style="margin-top:1rem"><label>Problems, concerns or actions for improvement</label>
+          <textarea name="problems" rows="3">${esc(d.problems)}</textarea></div>
+        <div class="grid2">
+          <div class="field"><label>Fire drill coordinator</label><input name="coordinator" value="${esc(d.coordinator)}"></div>
+          <div class="field"><label>Name of observer</label><input name="observer_name" value="${esc(d.observer_name)}"></div>
+          <div class="field"><label>Observer date</label><input type="date" name="observer_date" value="${esc(d.observer_date)}"></div>
+        </div>
+        <h3 style="margin-top:.6rem">Participants</h3>
+        <p class="muted" style="margin-top:0">Staff who took part in the drill and the debrief.</p>
+        <div data-picker></div>
+        <div class="field"><label>Other participants not in the employee list (one name per line)</label>
+          <textarea name="other_participants" rows="2" placeholder="e.g. agency or casual staff">${esc(others)}</textarea></div>
+        <p class="muted" style="font-size:.85rem">For signatures, save the report and click <strong>Print</strong>. The printout has a sign-in sheet for participants.</p>`,
+      async onSubmit(v, frm) {
+        if (!v.event_type) throw new Error("Choose the type of event (fire drill or fire alarm).");
+        const facility_id = Number(isAdmin() ? v.facility_id : (d.facility_id || state.me.facility_id));
+        const row = {
+          facility_id, drill_date: v.drill_date, start_time: nn(v.start_time), end_time: nn(v.end_time),
+          event_type: v.event_type, activity: v.event_type === "drill" ? nn(v.activity) : null,
+          problems: nn(v.problems), coordinator: nn(v.coordinator), observer_name: nn(v.observer_name), observer_date: nn(v.observer_date)
+        };
+        for (const [k] of DRILL_QUESTIONS) row[k] = v[k] || null;
+        let drillId = id;
+        if (isNew) drillId = check(await sb.from("fire_drills").insert({ ...row, created_by: state.me.id }).select("id").single()).id;
+        else check(await sb.from("fire_drills").update(row).eq("id", id));
+
+        const parts = pickedIds(frm).map((eid) => ({ drill_id: drillId, employee_id: eid, name: fullName(allEmps.find((e) => e.id === eid)) }));
+        for (const nm of String(v.other_participants || "").split("\n").map((s) => s.trim()).filter(Boolean))
+          parts.push({ drill_id: drillId, employee_id: null, name: nm });
+        if (!isNew) check(await sb.from("fire_drill_participants").delete().eq("drill_id", drillId));
+        if (parts.length) check(await sb.from("fire_drill_participants").insert(parts));
+        toast(isNew ? "Fire drill recorded" : "Fire drill report saved"); route();
+      }
+    });
+
+    // Participant list follows the chosen home
+    const facSel = $("[data-fac]", form);
+    const drawPicker = () => {
+      $$("input[name=emp]", form).forEach((c) => { const n = Number(c.value); if (c.checked) picked.add(n); else picked.delete(n); });
+      const fac = Number(facSel.value);
+      $("[data-picker]", form).innerHTML = employeePicker(allEmps.filter((e) => e.facility_id === fac), [...picked],
+        { facilityFilter: false, label: "Employees" });
+      wirePicker(form);
+    };
+    facSel.addEventListener("input", drawPicker);
+    drawPicker();
+    // Total time and drill-only activity question
+    const total = () => { $("[data-total]", form).textContent = fmtMinutes(drillMinutes({ start_time: form.start_time.value, end_time: form.end_time.value })); };
+    $$("[data-t]", form).forEach((i) => i.addEventListener("input", total));
+    const syncType = () => $("[data-actfield]", form).classList.toggle("hidden", (form.querySelector("input[name=event_type]:checked") || {}).value === "alarm");
+    $$("input[name=event_type]", form).forEach((r) => r.addEventListener("change", syncType));
+    syncType();
+  }
+
+  async function showDrill(id) {
+    let d;
+    try { d = await loadDrill(id); } catch (ex) { toast(ex.message, true); return; }
+    const parts = [...d.fire_drill_participants].sort((a, b) => a.name.localeCompare(b.name));
+    const { form } = openModal({
+      title: `Fire drill — ${facilityName(d.facility_id)}`, wide: true,
+      body: `
+        <div class="grid2">
+          <p><span class="muted">Date</span><br><strong>${fmtDate(d.drill_date)}</strong></p>
+          <p><span class="muted">Time</span><br><strong>${hhmm(d.start_time) || "—"}${d.end_time ? " – " + hhmm(d.end_time) : ""}</strong> (${fmtMinutes(drillMinutes(d))})</p>
+          <p><span class="muted">Type of event</span><br><strong>${esc(DRILL_TYPE[d.event_type] || "—")}</strong></p>
+          <p><span class="muted">Activities</span><br><strong>${esc(DRILL_ACTIVITY[d.activity] || "—")}</strong></p>
+        </div>
+        <h3>Outcome of fire event</h3>
+        <div class="table-wrap"><table class="qtable"><tbody>
+          ${DRILL_QUESTIONS.map(([k, label]) => `<tr><td>${esc(label)}</td><td style="text-align:right">${
+            d[k] ? badge(d[k] === "no" && DRILL_PROBLEM_QS.includes(k) ? "expired" : d[k] === "yes" ? "valid" : "neutral", ANSWER[d[k]]) : "—"}</td></tr>`).join("")}
+        </tbody></table></div>
+        <h3 style="margin-top:1rem">Problems, concerns or actions for improvement</h3>
+        <p style="white-space:pre-wrap">${esc(d.problems || "None recorded.")}</p>
+        <div class="grid2">
+          <p><span class="muted">Fire drill coordinator</span><br><strong>${esc(d.coordinator || "—")}</strong></p>
+          <p><span class="muted">Observer</span><br><strong>${esc(d.observer_name || "—")}</strong>${d.observer_date ? " · " + fmtDate(d.observer_date) : ""}</p>
+        </div>
+        <h3>Participants (${parts.length})</h3>
+        <p>${parts.map((p) => esc(p.name)).join(", ") || '<span class="muted">None recorded.</span>'}</p>`,
+      footer: `<div class="modal-foot">
+        <button type="button" class="secondary" data-print>Print</button>
+        <button type="button" data-edit>Edit</button></div>`
+    });
+    $("[data-print]", form).onclick = () => printDrill(id);
+    $("[data-edit]", form).onclick = () => editDrill(id);
+  }
+
+  // Printable copy of the report, laid out like the paper form, with a sign-in sheet
+  async function printDrill(id) {
+    const w = window.open("", "_blank"); // open first so pop-up blockers allow it
+    if (!w) { toast("Your browser blocked the print window. Allow pop-ups for this site and try again.", true); return; }
+    w.document.write("<p style='font-family:sans-serif'>Preparing report…</p>");
+    let d;
+    try { d = await loadDrill(id); } catch (ex) { w.close(); toast(ex.message, true); return; }
+    const box = (on) => (on ? "&#9746;" : "&#9744;");
+    const ymd = (v) => (v ? String(v).replace(/-/g, "/") : "");
+    const parts = [...d.fire_drill_participants].sort((a, b) => a.name.localeCompare(b.name));
+    const rows = parts.map((p) => p.name);
+    while (rows.length < Math.max(20, parts.length + 4)) rows.push("");
+    w.document.open();
+    w.document.write(`<!doctype html><html><head><meta charset="utf-8"><title>Fire Drill Report ${esc(d.drill_date)}</title>
+      <style>
+        body { font-family: Arial, Helvetica, sans-serif; font-size: 12pt; color: #000; margin: 1.6cm; }
+        h1 { text-align: center; font-size: 16pt; margin: 0 0 1em; }
+        .line { margin: .45em 0; } .val { display: inline-block; min-width: 14em; border-bottom: 1px solid #000; padding: 0 .3em; }
+        .sm { min-width: 5em; } table { width: 100%; border-collapse: collapse; margin: .6em 0; }
+        td, th { border: 1px solid #000; padding: .35em .5em; vertical-align: top; } th { background: #eee; }
+        .q td:not(:first-child) { width: 4.5em; text-align: center; white-space: nowrap; }
+        .opts span { margin-right: 1.6em; } .notes { min-height: 5em; white-space: pre-wrap; }
+        .sign td { height: 1.9em; } .page2 { page-break-before: always; }
+        .noprint { margin-bottom: 1em; } @media print { .noprint { display: none; } body { margin: 0; } }
+      </style></head><body>
+      <div class="noprint"><button onclick="window.print()">Print</button></div>
+      <h1>FIRE DRILL REPORT</h1>
+      <div class="line">Name of Home: <span class="val">${esc(facilityName(d.facility_id))}</span></div>
+      <div class="line">Date of Drill (YYYY/MM/DD): <span class="val">${ymd(d.drill_date)}</span></div>
+      <div class="line">Start time (hh:mm): <span class="val sm">${hhmm(d.start_time)}</span>
+        Completion Time (hh:mm): <span class="val sm">${hhmm(d.end_time)}</span>
+        Total Time: <span class="val sm">${drillMinutes(d) == null ? "" : fmtMinutes(drillMinutes(d))}</span></div>
+      <div class="line opts">Type of Event: <span>${box(d.event_type === "drill")} Fire Drill (planned)</span><span>${box(d.event_type === "alarm")} Fire Alarm (unplanned)</span></div>
+      <p><strong>If fire drill, please describe activities of the fire drill:</strong></p>
+      ${Object.entries(DRILL_ACTIVITY).map(([k, v]) => `<div class="line">${box(d.activity === k)} ${esc(v)}</div>`).join("")}
+      <p><strong>Outcome of Fire Event:</strong></p>
+      <table class="q"><tr><th style="text-align:left">Question</th><th>Yes</th><th>No</th><th>N/A</th></tr>
+        ${DRILL_QUESTIONS.map(([k, label]) => `<tr><td>${esc(label)}</td>${["yes", "no", "na"].map((v) => `<td>${box(d[k] === v)}</td>`).join("")}</tr>`).join("")}
+      </table>
+      <p><strong>Problems, concerns or actions for improvements</strong></p>
+      <table><tr><td class="notes">${esc(d.problems || "")}</td></tr></table>
+      <p><em>Following debrief session, staff participating must sign in the Page 2.</em></p>
+      <div class="line">Fire Drill Coordinator: <span class="val">${esc(d.coordinator || "")}</span></div>
+      <div class="line">Name of observer: <span class="val">${esc(d.observer_name || "")}</span></div>
+      <div class="line">Signature of observer: <span class="val"></span> Date (yyyy/mm/dd): <span class="val sm">${ymd(d.observer_date)}</span></div>
+      <div class="page2">
+        <h1>PARTICIPANTS</h1>
+        <table class="sign"><tr><th style="width:50%">PARTICIPANTS NAME</th><th>SIGNATURE</th></tr>
+          ${rows.map((n) => `<tr><td>${esc(n)}</td><td></td></tr>`).join("")}
+        </table>
+      </div>
+      <script>window.onload = function () { setTimeout(function () { window.print(); }, 300); };<\/script>
+      </body></html>`);
+    w.document.close();
+  }
+
+  async function downloadDrillsExcel(drills) {
+    toast("Preparing Excel file…");
+    const XLSX = await loadXLSX();
+    const ids = drills.map((d) => d.id);
+    const parts = [];
+    for (let i = 0; i < ids.length; i += 200)
+      parts.push(...check(await sb.from("fire_drill_participants").select("drill_id, name").in("drill_id", ids.slice(i, i + 200))));
+    const head = ["Date", "Home", "Type of event", "Activities", "Start", "Completion", "Total (min)",
+      ...DRILL_QUESTIONS.map((q) => q[1]), "Issues", "Problems / actions for improvement",
+      "Coordinator", "Observer", "Observer date", "Participants (count)", "Participants"];
+    const rows = [head];
+    for (const d of drills) {
+      const names = parts.filter((p) => p.drill_id === d.id).map((p) => p.name).sort();
+      rows.push([toDate(d.drill_date), facilityName(d.facility_id), DRILL_TYPE[d.event_type] || "", DRILL_ACTIVITY[d.activity] || "",
+        hhmm(d.start_time), hhmm(d.end_time), drillMinutes(d) ?? "",
+        ...DRILL_QUESTIONS.map(([k]) => ANSWER[d[k]] || ""), drillIssues(d), d.problems || "",
+        d.coordinator || "", d.observer_name || "", toDate(d.observer_date), names.length, names.join(", ")]);
+    }
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, sheetFrom(XLSX, rows, [12, 28, 20, 30, 8, 11, 10, ...DRILL_QUESTIONS.map(() => 16), 8, 40, 20, 20, 12, 12, 60]), "Fire drills");
+    XLSX.writeFile(wb, `TrainWell-fire-drills-${todayISO()}.xlsx`);
   }
 
   // -------------------------------------------------------- courses
@@ -1005,19 +1424,19 @@
   // Delete a facility. If it still has employees, sessions or managers,
   // they must be moved to another facility first so nothing is lost.
   async function deleteFacility(f) {
-    const count = async (table) => {
+    const count = async (table, optional = false) => {
       const { count: n, error } = await sb.from(table).select("id", { count: "exact", head: true }).eq("facility_id", f.id);
-      if (error) throw new Error(error.message);
+      if (error) { if (optional) return 0; throw new Error(error.message); }
       return n || 0;
     };
-    let nEmp, nSess, nMgr;
-    try { [nEmp, nSess, nMgr] = await Promise.all([count("employees"), count("sessions"), count("profiles")]); }
+    let nEmp, nSess, nMgr, nDrill;
+    try { [nEmp, nSess, nMgr, nDrill] = await Promise.all([count("employees"), count("sessions"), count("profiles"), count("fire_drills", true)]); }
     catch (ex) { toast(ex.message, true); return; }
     const others = state.facilities.filter((x) => x.id !== f.id);
-    const inUse = nEmp + nSess + nMgr > 0;
+    const inUse = nEmp + nSess + nMgr + nDrill > 0;
 
     if (inUse && !others.length) {
-      openModal({ title: `Delete ${f.name}`, body: `<p>This facility still has ${nEmp} employee(s), ${nSess} session(s) and ${nMgr} manager(s).
+      openModal({ title: `Delete ${f.name}`, body: `<p>This facility still has ${nEmp} employee(s), ${nSess} session(s), ${nDrill} fire drill report(s) and ${nMgr} manager(s).
         Add another facility first so they can be moved there, then delete this one.</p>` });
       return;
     }
@@ -1025,12 +1444,12 @@
     openModal({
       title: `Delete ${f.name}`, submitText: "Delete facility",
       body: inUse ? `
-        <p>This facility still has <strong>${nEmp}</strong> employee(s) (active and inactive), <strong>${nSess}</strong> session(s)
-          and <strong>${nMgr}</strong> manager login(s). They'll be moved to the facility you choose, with all their training records kept.</p>
+        <p>This facility still has <strong>${nEmp}</strong> employee(s) (active and inactive), <strong>${nSess}</strong> session(s),
+          <strong>${nDrill}</strong> fire drill report(s) and <strong>${nMgr}</strong> manager login(s). They'll be moved to the facility you choose, with all their training records kept.</p>
         <div class="field"><label>Move everything to *</label>
           <select name="target" required>${others.map((o) => `<option value="${o.id}">${esc(o.name)}</option>`).join("")}</select></div>
         <div class="field"><label>Type <strong>DELETE</strong> to confirm</label><input name="confirm" required autocomplete="off"></div>`
-        : `<p>This facility has no employees, sessions or managers.</p>
+        : `<p>This facility has no employees, sessions, fire drill reports or managers.</p>
         <div class="field"><label>Type <strong>DELETE</strong> to confirm</label><input name="confirm" required autocomplete="off"></div>`,
       async onSubmit(d) {
         if (d.confirm.trim().toUpperCase() !== "DELETE") throw new Error("Type DELETE to confirm.");
@@ -1039,6 +1458,7 @@
           check(await sb.from("employees").update({ facility_id: target }).eq("facility_id", f.id));
           check(await sb.from("sessions").update({ facility_id: target }).eq("facility_id", f.id));
           check(await sb.from("profiles").update({ facility_id: target }).eq("facility_id", f.id));
+          if (nDrill) check(await sb.from("fire_drills").update({ facility_id: target }).eq("facility_id", f.id));
         }
         check(await sb.from("facilities").delete().eq("id", f.id));
         await loadLookups(); toast(`${f.name} deleted`); route();
