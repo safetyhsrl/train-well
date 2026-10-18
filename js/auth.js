@@ -5,14 +5,17 @@
     el.textContent = text; el.className = "alert " + kind;
   };
 
-  let recovering = location.hash.includes("type=recovery");
+  // Arriving from an invite or password-reset email: show "set a new password"
+  const params = new URLSearchParams(location.search);
+  let recovering = params.has("setpw") || /type=(recovery|invite)/.test(location.hash);
+  const showReset = () => {
+    $("loginForm").classList.add("hidden");
+    $("resetForm").classList.remove("hidden");
+  };
+  if (recovering) showReset();
 
   sb.auth.onAuthStateChange((event) => {
-    if (event === "PASSWORD_RECOVERY") {
-      recovering = true;
-      $("loginForm").classList.add("hidden");
-      $("resetForm").classList.remove("hidden");
-    }
+    if (event === "PASSWORD_RECOVERY") { recovering = true; showReset(); }
   });
 
   // Already signed in? Go straight to the app.
@@ -46,7 +49,7 @@
   $("forgotBtn").addEventListener("click", async () => {
     const email = $("email").value.trim();
     if (!email) { show($("msg"), "Type your email above first, then click “Forgot password?”."); return; }
-    const redirectTo = location.href.split("#")[0].replace(/[^/]*$/, "") + "index.html";
+    const redirectTo = location.href.split(/[?#]/)[0].replace(/[^/]*$/, "") + "index.html?setpw=1";
     const { error } = await sb.auth.resetPasswordForEmail(email, { redirectTo });
     if (error) show($("msg"), error.message);
     else show($("msg"), "If that email has an account, a reset link is on its way.", "info");
@@ -54,6 +57,8 @@
 
   $("resetForm").addEventListener("submit", async (e) => {
     e.preventDefault();
+    const { data: s } = await sb.auth.getSession();
+    if (!s.session) { show($("resetMsg"), "This link has expired or was already used. Ask your administrator to send a new one, or use “Forgot password?”."); return; }
     const { error } = await sb.auth.updateUser({ password: $("newPassword").value });
     if (error) { show($("resetMsg"), error.message); return; }
     location.replace("app.html");

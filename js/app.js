@@ -423,6 +423,7 @@
     async render(view) {
       const all = await loadEmployees();
       const { map } = await complianceMatrix(all);
+      const logins = await loadEmployeeLogins();
       const mandatory = state.courses.filter((c) => c.mandatory && c.active);
       const f = this.filters;
 
@@ -444,7 +445,7 @@
             <span class="spacer"></span><span class="muted" data-count></span>
           </div>
           <div class="table-wrap"><table>
-            <thead><tr><th>Name</th><th>Job title</th><th>Department</th><th>Facility</th><th>Status</th><th>Mandatory training</th><th></th></tr></thead>
+            <thead><tr><th>Name</th><th>Job title</th><th>Department</th><th>Facility</th><th>Status</th><th>Mandatory training</th>${isAdmin() ? "<th>App login</th>" : ""}<th></th></tr></thead>
             <tbody data-rows></tbody></table></div>
         </div>`;
 
@@ -463,8 +464,10 @@
             <td>${esc(e.job_title || "—")}</td><td>${esc(e.department || "—")}</td>
             <td>${esc(facilityName(e.facility_id))}</td><td>${badge(e.status)}</td>
             <td>${g === null ? "—" : g === 0 ? badge("valid", "Up to date") : badge("expired", g + " outstanding")}</td>
+            ${isAdmin() ? `<td>${logins.has(e.id) ? badge("active", "Has login") : `<button class="link small" data-login="${e.id}">Give login</button>`}</td>` : ""}
             <td class="actions"><button class="link small" data-edit="${e.id}">Edit</button> ${delBtn(e.id)}</td></tr>`;
-        }).join("") || `<tr><td colspan="7" class="empty">No employees match. Add one or import a CSV.</td></tr>`;
+        }).join("") || `<tr><td colspan="${isAdmin() ? 8 : 7}" class="empty">No employees match. Add one or import a CSV.</td></tr>`;
+        $$("[data-login]", view).forEach((b) => b.onclick = () => giveLogin(all.find((e) => e.id === Number(b.dataset.login))));
         $$("[data-view]", view).forEach((b) => b.onclick = () => showEmployee(Number(b.dataset.view)));
         $$("[data-edit]", view).forEach((b) => b.onclick = () => editEmployee(all.find((e) => e.id === Number(b.dataset.edit))));
         $$("[data-del]", view).forEach((b) => b.onclick = async () => {
@@ -577,12 +580,16 @@
     const latest = new Map();
     for (const c of comps) if (!latest.has(c.course_id)) latest.set(c.course_id, c);
     const mandatory = state.courses.filter((c) => c.mandatory && c.active);
+    const login = (await loadEmployeeLogins()).get(e.id);
 
     const { form } = openModal({
       title: fullName(e), wide: true,
       body: `
         <p class="muted" style="margin-top:0">${esc([e.job_title, e.department, facilityName(e.facility_id)].filter(Boolean).join(" · "))}
           ${e.hire_date ? " · Hired " + fmtDate(e.hire_date) : ""} · ${badge(e.status)}</p>
+        ${isAdmin() ? `<div class="alert info" style="display:flex;justify-content:space-between;align-items:center;gap:1rem;flex-wrap:wrap">
+          <span>${login ? `App login: <strong>${esc(login.email)}</strong>` : "No app login yet. Give them one so they can see their training and upload certificates."}</span>
+          ${login ? `<button type="button" class="secondary small" data-rmlogin>Remove login</button>` : `<button type="button" class="small" data-givelogin>Give login</button>`}</div>` : ""}
         <h3>Mandatory training</h3>
         <div class="table-wrap"><table><thead><tr><th>Course</th><th>Status</th><th>Completed</th><th>Expires</th></tr></thead><tbody>
           ${mandatory.map((c) => { const l = latest.get(c.id); const s = l ? expiryStatus(l.expires_on) : "missing";
@@ -590,18 +597,23 @@
             || `<tr><td colspan="4" class="empty">No mandatory courses set up.</td></tr>`}
         </tbody></table></div>
         <h3 style="margin-top:1.2rem">Full training history</h3>
-        <div class="table-wrap"><table><thead><tr><th>Course</th><th>Completed</th><th>Expires</th><th>Score</th><th>Certificate</th></tr></thead><tbody>
-          ${comps.map((c) => `<tr><td>${esc(courseTitle(c.course_id))}</td><td>${fmtDate(c.completed_on)}</td>
+        <div class="table-wrap"><table><thead><tr><th>Course</th><th>Completed</th><th>Expires</th><th>Score</th><th>Certificate #</th><th>File</th></tr></thead><tbody>
+          ${comps.map((c) => `<tr><td>${esc(courseTitle(c.course_id))}${c.uploaded_by_employee ? ' <span class="muted" style="font-size:.8rem">(uploaded by employee)</span>' : ""}</td><td>${fmtDate(c.completed_on)}</td>
             <td>${fmtDate(c.expires_on)} ${c.expires_on ? badge(expiryStatus(c.expires_on)) : ""}</td>
-            <td>${c.score ?? "—"}</td><td>${esc(c.certificate_no || "—")}</td></tr>`).join("")
-            || `<tr><td colspan="5" class="empty">No training recorded yet.</td></tr>`}
+            <td>${c.score ?? "—"}</td><td>${esc(c.certificate_no || "—")}</td><td>${certLink(c)}</td></tr>`).join("")
+            || `<tr><td colspan="6" class="empty">No training recorded yet.</td></tr>`}
         </tbody></table></div>`,
       footer: `<div class="modal-foot">
         <button type="button" class="secondary" data-edit>Edit details</button>
+        <button type="button" class="secondary" data-upload>Upload certificate</button>
         <button type="button" data-addrec>+ Add training record</button></div>`
     });
     $("[data-edit]", form).onclick = () => editEmployee(e);
     $("[data-addrec]", form).onclick = () => editRecord(null, { employeeIds: [e.id] });
+    $("[data-upload]", form).onclick = () => uploadCertificate({ employeeId: e.id, title: `Upload certificate for ${fullName(e)}` });
+    $("[data-givelogin]", form)?.addEventListener("click", () => giveLogin(e));
+    $("[data-rmlogin]", form)?.addEventListener("click", () => removeLogin(e));
+    wireCerts(form);
   }
 
   // -------------------------------------------------------- records
@@ -630,7 +642,7 @@
             <span class="spacer"></span><span class="muted" data-count></span>
           </div>
           <div class="table-wrap"><table>
-            <thead><tr><th>Employee</th><th>Facility</th><th>Course</th><th>Completed</th><th>Expires</th><th>Status</th><th>Score</th><th></th></tr></thead>
+            <thead><tr><th>Employee</th><th>Facility</th><th>Course</th><th>Completed</th><th>Expires</th><th>Status</th><th>File</th><th></th></tr></thead>
             <tbody data-rows></tbody></table></div>
         </div>`;
       let shown = [];
@@ -646,16 +658,18 @@
           <td><button class="link" data-emp="${r.employee_id}">${esc(fullName(r.employees))}</button></td>
           <td>${esc(facilityName(r.employees.facility_id))}</td><td>${esc(courseTitle(r.course_id))}</td>
           <td>${fmtDate(r.completed_on)}</td><td>${fmtDate(r.expires_on)}</td>
-          <td>${badge(expiryStatus(r.expires_on))}</td><td>${r.score ?? "—"}</td>
+          <td>${badge(expiryStatus(r.expires_on))}</td><td>${certLink(r)}</td>
           <td class="actions"><button class="link small" data-edit="${r.id}">Edit</button>
             <button class="link small" data-del="${r.id}" style="color:var(--bad)">Delete</button></td></tr>`).join("")
           + (shown.length > 500 ? `<tr><td colspan="8" class="empty">Showing first 500. Narrow the filters or export to see all.</td></tr>` : "")
           || `<tr><td colspan="8" class="empty">No training records yet.</td></tr>`;
         $$("[data-emp]", view).forEach((b) => b.onclick = () => showEmployee(Number(b.dataset.emp)));
         $$("[data-edit]", view).forEach((b) => b.onclick = () => editRecord(recs.find((r) => r.id === Number(b.dataset.edit))));
+        wireCerts(view);
         $$("[data-del]", view).forEach((b) => b.onclick = async () => {
-          if (!(await confirmBox("Delete this training record? This cannot be undone."))) return;
-          try { check(await sb.from("completions").delete().eq("id", Number(b.dataset.del))); toast("Record deleted"); route(); }
+          const rec = recs.find((r) => r.id === Number(b.dataset.del));
+          if (!(await confirmBox("Delete this training record" + (rec.certificate_path ? " and its certificate file" : "") + "? This cannot be undone."))) return;
+          try { check(await sb.from("completions").delete().eq("id", rec.id)); await removeCertificate(rec.certificate_path); toast("Record deleted"); route(); }
           catch (ex) { toast(ex.message, true); }
         });
       };
@@ -718,18 +732,25 @@
           <div class="field"><label>Score</label><input type="number" step="0.01" name="score" value="${esc(r?.score)}"></div>
           <div class="field"><label>Certificate #</label><input name="certificate_no" value="${esc(r?.certificate_no)}"></div>
         </div>
-        <div class="field"><label>Notes</label><textarea name="notes" rows="2">${esc(r?.notes)}</textarea></div>`,
+        <div class="field"><label>Notes</label><textarea name="notes" rows="2">${esc(r?.notes)}</textarea></div>
+        <div class="field"><label>${r?.certificate_path ? "Replace certificate file" : "Certificate file"} <span class="muted">(optional, PDF or photo${isNew ? ", one employee at a time" : ""})</span></label>
+          <input type="file" name="file" accept="application/pdf,image/*,.heic,.heif"></div>`,
       async onSubmit(d, frm) {
         const base = { course_id: Number(d.course_id), completed_on: nn(d.completed_on), expires_on: nn(d.expires_on),
           score: nn(d.score), certificate_no: nn(d.certificate_no), notes: nn(d.notes) };
+        const file = $("input[type=file]", frm).files[0];
         if (isNew) {
           const ids = pickedIds(frm);
           if (!ids.length) throw new Error("Select at least one employee.");
+          if (file && ids.length !== 1) throw new Error("A certificate file can only be attached when recording for one employee. Untick the others, or leave the file empty.");
+          if (file) base.certificate_path = await putCertificate(ids[0], file);
           check(await sb.from("completions").insert(ids.map((id) => ({ ...base, employee_id: id, recorded_by: state.me.id }))));
           toast(`Recorded for ${ids.length} employee${ids.length > 1 ? "s" : ""}`);
         } else {
           // Clearing the expiry box lets the database recalculate it from the course
+          if (file) base.certificate_path = await putCertificate(r.employee_id, file);
           check(await sb.from("completions").update(base).eq("id", r.id));
+          if (file && r.certificate_path) await removeCertificate(r.certificate_path);
           toast("Record saved");
         }
         route();
@@ -1232,11 +1253,12 @@
     title: "Users", adminOnly: true,
     actions() { return `<button data-act="add">+ Add user</button>`; },
     async render(view) {
-      const users = check(await sb.from("profiles").select("*").order("full_name"));
+      const users = check(await sb.from("profiles").select("*").neq("role", "employee").order("full_name"));
       view.innerHTML = `
         <div class="card">
           <p class="muted" style="margin-top:0"><strong>Admins</strong> see and manage all facilities, courses and users.
-            <strong>Managers</strong> see only their own facility's employees, sessions and records.</p>
+            <strong>Managers</strong> see only their own facility's employees, sessions and records.
+            Employee logins are managed on the <a href="#employees">Employees</a> page (open an employee → <strong>Give login</strong>).</p>
           <div class="table-wrap"><table>
             <thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Facility</th><th>Status</th><th></th></tr></thead>
             <tbody>${users.map((u) => `<tr>
@@ -1422,12 +1444,244 @@
     });
   }
 
+  // =============================================================== CERTIFICATES
+  // Files live in the private "certificates" storage bucket as  <employee id>/<file>
+  const CERT_MAX = 10 * 1024 * 1024;
+  async function putCertificate(employeeId, file) {
+    if (file.size > CERT_MAX) throw new Error("That file is over 10 MB. Try a smaller photo or a PDF.");
+    let type = file.type;
+    if (!type && /\.hei[cf]$/i.test(file.name)) type = "image/heic";
+    const safe = file.name.replace(/[^A-Za-z0-9._-]+/g, "_").slice(-80);
+    const path = `${employeeId}/${Date.now()}-${safe}`;
+    const { error } = await sb.storage.from("certificates").upload(path, file, { contentType: type || undefined, upsert: false });
+    if (error) {
+      if (/mime|type/i.test(error.message)) throw new Error("Only PDF files or photos (JPG, PNG, HEIC) can be uploaded.");
+      if (/bucket/i.test(error.message)) throw new Error("Certificate uploads aren't set up yet. An administrator needs to run the employee-logins update (see README).");
+      throw new Error(error.message);
+    }
+    return path;
+  }
+  async function removeCertificate(path) {
+    if (path) await sb.storage.from("certificates").remove([path]);
+  }
+  async function openCertificate(path) {
+    const w = window.open("", "_blank"); // open first so pop-up blockers allow it
+    const { data, error } = await sb.storage.from("certificates").createSignedUrl(path, 300);
+    if (error || !data) { if (w) w.close(); toast(error ? error.message : "Could not open the file.", true); return; }
+    if (w) w.location.href = data.signedUrl; else location.href = data.signedUrl;
+  }
+  const certLink = (r) => r.certificate_path
+    ? `<button class="link small" data-cert="${esc(r.certificate_path)}">View file</button>` : `<span class="muted">—</span>`;
+  const wireCerts = (root) => $$("[data-cert]", root).forEach((b) => b.onclick = () => openCertificate(b.dataset.cert));
+
+  // Upload form, used by employees (their own) and by managers (for one employee)
+  function uploadCertificate({ employeeId, courseId = "", byEmployee = false, title = "Upload certificate" }) {
+    openModal({
+      title, submitText: "Upload",
+      body: `
+        <div class="field"><label>Course *</label><select name="course_id" required>${courseOptions(courseId)}</select></div>
+        <div class="grid2">
+          <div class="field"><label>Date completed *</label><input type="date" name="completed_on" required max="${todayISO()}"></div>
+          <div class="field"><label>Expiry date <span class="muted">(blank = worked out from the course)</span></label><input type="date" name="expires_on"></div>
+          <div class="field"><label>Certificate #</label><input name="certificate_no"></div>
+        </div>
+        <div class="field"><label>Certificate file * <span class="muted">PDF or photo, up to 10 MB</span></label>
+          <input type="file" name="file" required accept="application/pdf,image/*,.heic,.heif"></div>
+        <p class="muted" style="font-size:.85rem;margin:0">On a phone you can take a photo of the certificate here.</p>`,
+      async onSubmit(d, frm) {
+        const file = $("input[type=file]", frm).files[0];
+        if (!file) throw new Error("Choose the certificate file.");
+        const path = await putCertificate(employeeId, file);
+        const row = {
+          employee_id: employeeId, course_id: Number(d.course_id), completed_on: d.completed_on, expires_on: nn(d.expires_on),
+          certificate_no: nn(d.certificate_no), certificate_path: path, uploaded_by_employee: !!byEmployee,
+          recorded_by: state.me.id, notes: byEmployee ? "Uploaded by employee" : null
+        };
+        const { error } = await sb.from("completions").insert(row);
+        if (error) { await removeCertificate(path); throw new Error(error.message); }
+        toast("Certificate uploaded"); route();
+      }
+    });
+  }
+
+  // =============================================================== EMPLOYEE PORTAL
+  const isEmployee = () => state.me && state.me.role === "employee";
+  const MY_LABEL = { valid: "Up to date", expiring: "Due soon", expired: "Overdue", missing: "To complete" };
+  const myBadge = (s) => badge(s, MY_LABEL[s]);
+
+  async function loadMyTraining() {
+    const recs = check(await sb.from("completions").select("*").eq("employee_id", state.me.employee_id)
+      .order("completed_on", { ascending: false, nullsFirst: false }).order("expires_on", { ascending: false, nullsFirst: false }));
+    const latest = new Map();
+    for (const r of recs) if (!latest.has(r.course_id)) latest.set(r.course_id, r);
+    const rows = state.courses
+      .filter((c) => c.active && (c.mandatory || latest.has(c.id)))
+      .map((c) => { const r = latest.get(c.id); return { course: c, rec: r, status: r ? expiryStatus(r.expires_on) : "missing" }; })
+      .sort((a, b) => ({ expired: 0, missing: 1, expiring: 2, valid: 3 }[a.status] - { expired: 0, missing: 1, expiring: 2, valid: 3 }[b.status])
+        || a.course.title.localeCompare(b.course.title));
+    return { recs, rows };
+  }
+
+  views.my = {
+    title: "My training", employee: true,
+    actions() { return `<button data-act="upload">+ Upload certificate</button>`; },
+    async render(view) {
+      const { rows } = await loadMyTraining();
+      const n = (s) => rows.filter((r) => r.status === s).length;
+      const todo = rows.filter((r) => r.status !== "valid");
+      view.innerHTML = `
+        <p class="muted" style="margin-top:0">Hi ${esc(state.me.full_name.split(" ")[0])}. Here is your training at ${esc(facilityName(state.myEmp?.facility_id))}.</p>
+        <div class="stats">
+          <div class="stat ok"><div class="label">Up to date</div><div class="value">${n("valid")}</div></div>
+          <div class="stat warn"><div class="label">Due soon (${WARN_DAYS} days)</div><div class="value">${n("expiring")}</div></div>
+          <div class="stat bad"><div class="label">Overdue</div><div class="value">${n("expired")}</div></div>
+          <div class="stat bad"><div class="label">Still to complete</div><div class="value">${n("missing")}</div></div>
+        </div>
+        <div class="card">
+          <h2>Courses you need to complete</h2>
+          ${todo.length ? `<p class="muted" style="margin-top:0">Done one of these? Upload the certificate and your record updates straight away.</p>` : ""}
+          <div class="table-wrap"><table>
+            <tbody>${todo.map((r) => `<tr><td style="white-space:normal"><strong>${esc(r.course.title)}</strong><br>
+                <span style="display:inline-flex;gap:.5rem;align-items:center;margin-top:.25rem">${myBadge(r.status)}
+                <span class="muted" style="font-size:.85rem">${r.rec?.expires_on ? "Expires " + fmtDate(r.rec.expires_on) : "Not done yet"}</span></span></td>
+              <td class="actions" style="vertical-align:middle"><button class="small" data-up="${r.course.id}">Upload</button></td></tr>`).join("")
+              || `<tr><td colspan="2" class="empty">You're all up to date. 🎉</td></tr>`}
+            </tbody></table></div>
+        </div>
+        <div class="card">
+          <h2>All my training</h2>
+          <div class="table-wrap"><table>
+            <thead><tr><th>Course</th><th>Required</th><th>Status</th><th>Completed</th><th>Expiry date</th><th>Certificate</th></tr></thead>
+            <tbody>${rows.map((r) => `<tr><td>${esc(r.course.title)}</td>
+              <td>${r.course.mandatory ? badge("admin", "Required") : badge("neutral", "Optional")}</td>
+              <td>${myBadge(r.status)}</td><td>${fmtDate(r.rec?.completed_on)}</td><td>${fmtDate(r.rec?.expires_on)}</td>
+              <td>${r.rec ? certLink(r.rec) : '<span class="muted">—</span>'}</td></tr>`).join("")
+              || `<tr><td colspan="6" class="empty">No courses set up yet.</td></tr>`}
+            </tbody></table></div>
+        </div>`;
+      $$("[data-up]", view).forEach((b) => b.onclick = () => uploadCertificate({ employeeId: state.me.employee_id, courseId: b.dataset.up, byEmployee: true }));
+      wireCerts(view);
+      this.onAction = (act) => { if (act === "upload") uploadCertificate({ employeeId: state.me.employee_id, byEmployee: true }); };
+    }
+  };
+
+  views.certs = {
+    title: "My certificates", employee: true,
+    actions() { return `<button data-act="upload">+ Upload certificate</button>`; },
+    async render(view) {
+      const { recs } = await loadMyTraining();
+      view.innerHTML = `
+        <div class="card">
+          <p class="muted" style="margin-top:0">Everything on your training record. Files you uploaded can be viewed or deleted here.</p>
+          <div class="table-wrap"><table>
+            <thead><tr><th>Course</th><th>Completed</th><th>Expiry date</th><th>Status</th><th>Certificate #</th><th>File</th><th>Added by</th><th></th></tr></thead>
+            <tbody>${recs.map((r) => `<tr><td>${esc(courseTitle(r.course_id))}</td><td>${fmtDate(r.completed_on)}</td><td>${fmtDate(r.expires_on)}</td>
+              <td>${myBadge(expiryStatus(r.expires_on))}</td><td>${esc(r.certificate_no || "—")}</td><td>${certLink(r)}</td>
+              <td>${r.uploaded_by_employee ? "You" : "Your manager"}</td>
+              <td class="actions">${r.uploaded_by_employee ? delBtn(r.id) : ""}</td></tr>`).join("")
+              || `<tr><td colspan="8" class="empty">Nothing yet. Click <strong>+ Upload certificate</strong> to add one.</td></tr>`}
+            </tbody></table></div>
+        </div>`;
+      wireCerts(view);
+      $$("[data-del]", view).forEach((b) => b.onclick = async () => {
+        const r = recs.find((x) => x.id === Number(b.dataset.del));
+        if (!(await confirmBox(`Delete your ${courseTitle(r.course_id)} certificate? This cannot be undone.`))) return;
+        try { check(await sb.from("completions").delete().eq("id", r.id)); await removeCertificate(r.certificate_path); toast("Certificate deleted"); route(); }
+        catch (ex) { toast(ex.message, true); }
+      });
+      this.onAction = (act) => { if (act === "upload") uploadCertificate({ employeeId: state.me.employee_id, byEmployee: true }); };
+    }
+  };
+
+  views.mysessions = {
+    title: "My sessions", employee: true,
+    async render(view) {
+      const all = check(await sb.from("sessions").select("*, attendance(status, employee_id)").order("starts_at"));
+      const now = new Date().toISOString();
+      const up = all.filter((s) => s.starts_at >= now);
+      const past = all.filter((s) => s.starts_at < now).reverse().slice(0, 20);
+      const status = (s) => (s.attendance.find((a) => a.employee_id === state.me.employee_id) || {}).status || "registered";
+      const table = (list, empty) => `<div class="table-wrap"><table>
+        <thead><tr><th>Date</th><th>Course</th><th>Location</th><th>Trainer</th><th>Status</th></tr></thead>
+        <tbody>${list.map((s) => `<tr><td>${fmtDateTime(s.starts_at)}</td><td>${esc(courseTitle(s.course_id))}</td>
+          <td>${esc(s.location || "—")}</td><td>${esc(s.trainer || "—")}</td><td>${badge(status(s), status(s)[0].toUpperCase() + status(s).slice(1))}</td></tr>`).join("")
+          || `<tr><td colspan="5" class="empty">${empty}</td></tr>`}</tbody></table></div>`;
+      view.innerHTML = `
+        <div class="card"><h2>Coming up</h2>${table(up, "You're not booked into any upcoming sessions.")}</div>
+        <div class="card"><h2>Past sessions</h2>${table(past, "No past sessions yet.")}</div>`;
+    }
+  };
+
+  views.mydrills = {
+    title: "My fire drills", employee: true,
+    async render(view) {
+      const { data, error } = await sb.from("fire_drills").select("*").order("drill_date", { ascending: false });
+      if (error) { view.innerHTML = `<div class="card empty">Fire drills aren't available yet.</div>`; return; }
+      view.innerHTML = `
+        <div class="card">
+          <p class="muted" style="margin-top:0">Fire drills and fire alarms you took part in.</p>
+          <div class="table-wrap"><table>
+            <thead><tr><th>Date</th><th>Type</th><th>Time</th><th>Total</th><th>Coordinator</th></tr></thead>
+            <tbody>${data.map((d) => `<tr><td>${fmtDate(d.drill_date)}</td>
+              <td>${d.event_type === "alarm" ? badge("expiring", "Fire alarm") : badge("neutral", "Fire drill")}</td>
+              <td>${hhmm(d.start_time) || "—"}${d.end_time ? "–" + hhmm(d.end_time) : ""}</td>
+              <td>${fmtMinutes(drillMinutes(d))}</td><td>${esc(d.coordinator || "—")}</td></tr>`).join("")
+              || `<tr><td colspan="5" class="empty">No fire drills recorded for you yet.</td></tr>`}
+            </tbody></table></div>
+        </div>`;
+    }
+  };
+
+  // =============================================================== EMPLOYEE LOGINS (admin)
+  async function loadEmployeeLogins() {
+    if (!isAdmin()) return new Map();
+    const { data } = await sb.from("profiles").select("id, email, employee_id, active").eq("role", "employee");
+    return new Map((data || []).map((p) => [p.employee_id, p]));
+  }
+
+  function giveLogin(e) {
+    const { form } = openModal({
+      title: `Give ${fullName(e)} a login`, submitText: "Create login",
+      body: `
+        <div class="field"><label>Their email *</label><input type="email" name="email" required value="${esc(e.email)}"></div>
+        <div class="field"><label>How will they get in?</label>
+          <div class="choices stacked">
+            <label class="choice"><input type="radio" name="mode" value="invite" checked> Email them an invite. They click the link and choose their own password.</label>
+            <label class="choice"><input type="radio" name="mode" value="password"> Set a temporary password now (no email is sent)</label>
+          </div></div>
+        <div class="field hidden" data-pw><label>Temporary password</label>
+          <div style="display:flex;gap:.5rem"><input name="password" minlength="8" value="${esc(genPassword())}">
+          <button type="button" class="secondary" data-copy>Copy</button></div>
+          <p class="muted" style="font-size:.85rem;margin:.3rem 0 0">Give it to them privately. They can change it any time with “Forgot password?” on the sign-in page.</p></div>
+        <p class="muted" style="font-size:.85rem;margin:0">They'll sign in at the same address as you, and will only see their own training, certificates, sessions and fire drills.</p>`,
+      async onSubmit(d) {
+        const redirect_to = location.href.split(/[?#]/)[0].replace(/[^/]*$/, "") + "index.html?setpw=1";
+        await invokeFn("employee-access", { action: d.mode, employee_id: e.id, email: d.email.trim(), password: d.password, redirect_to });
+        toast(d.mode === "invite" ? `Invite sent to ${d.email.trim()}` : `Login created for ${fullName(e)}`);
+        route();
+      }
+    });
+    const sync = () => $("[data-pw]", form).classList.toggle("hidden", form.querySelector("input[name=mode]:checked").value !== "password");
+    $$("input[name=mode]", form).forEach((r) => r.addEventListener("change", sync));
+    $("[data-copy]", form).onclick = () => { navigator.clipboard?.writeText(form.password.value); toast("Password copied"); };
+  }
+
+  async function removeLogin(e) {
+    if (!(await confirmBox(`Remove ${fullName(e)}'s login? They won't be able to sign in. Their training records and certificates are kept.`, { okText: "Remove login" }))) return;
+    try { await invokeFn("employee-access", { action: "remove", employee_id: e.id }); toast("Login removed"); route(); }
+    catch (ex) { toast(ex.message, true); }
+  }
+
   // ============================================================== ROUTER
   let currentView = null;
   async function route() {
-    let name = (location.hash || "#dashboard").slice(1);
+    const home = isEmployee() ? "my" : "dashboard";
+    let name = (location.hash || "#" + home).slice(1);
     let v = views[name];
-    if (!v || (v.adminOnly && !isAdmin())) { name = "dashboard"; v = views.dashboard; }
+    if (!v || (v.adminOnly && !isAdmin()) || !!v.employee !== isEmployee()) {
+      name = home; v = views[home];
+      history.replaceState(null, "", "#" + name);
+    }
     currentView = v;
     $$("#nav a").forEach((a) => a.classList.toggle("active", a.getAttribute("href") === "#" + name));
     $("#pageTitle").textContent = v.title;
@@ -1457,8 +1711,15 @@
     state.me = me;
     sb.auth.onAuthStateChange((event) => { if (event === "SIGNED_OUT") location.replace("index.html"); });
     await loadLookups();
+    if (isEmployee()) {
+      if (!me.employee_id) throw new Error("This login isn't linked to an employee record. Ask your administrator.");
+      state.myEmp = check(await sb.from("employees").select("*").eq("id", me.employee_id).maybeSingle());
+      $$(".staff-only, .admin-only").forEach((el) => el.classList.add("hidden"));
+      $$(".employee-only").forEach((el) => el.classList.remove("hidden"));
+    }
     $("#meName").textContent = me.full_name;
-    $("#meRole").textContent = me.role === "admin" ? "Administrator · all facilities" : `Manager · ${facilityName(me.facility_id)}`;
+    $("#meRole").textContent = me.role === "admin" ? "Administrator · all facilities"
+      : me.role === "employee" ? `Staff · ${facilityName(state.myEmp?.facility_id)}` : `Manager · ${facilityName(me.facility_id)}`;
     if (!isAdmin()) $$(".admin-only").forEach((el) => el.classList.add("hidden"));
     if (!isAdmin()) views.employees.filters.facility = "";
     $("#shell").classList.remove("hidden");
