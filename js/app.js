@@ -1251,14 +1251,26 @@
   // -------------------------------------------------------- users (admin)
   views.users = {
     title: "Users", adminOnly: true,
+    filters: { role: "" },
     actions() { return `<button data-act="add">+ Add user</button>`; },
     async render(view) {
-      const users = check(await sb.from("profiles").select("*").neq("role", "employee").order("full_name"));
+      const f = this.filters;
+      const all = check(await sb.from("profiles").select("*").order("full_name"));
+      const users = all.filter((u) => !f.role || u.role === f.role);
+      const count = (r) => all.filter((u) => u.role === r).length;
       view.innerHTML = `
         <div class="card">
-          <p class="muted" style="margin-top:0"><strong>Admins</strong> see and manage all facilities, courses and users.
+          <p class="muted" style="margin-top:0"><strong>Admins</strong> see and manage everything.
             <strong>Managers</strong> see only their own facility's employees, sessions and records.
-            Employee logins are managed on the <a href="#employees">Employees</a> page (open an employee → <strong>Give login</strong>).</p>
+            <strong>Employees</strong> see only their own training, certificates, sessions and fire drills.</p>
+          <div class="toolbar">
+            <select data-f="role">
+              <option value="">All roles (${all.length})</option>
+              <option value="admin" ${f.role === "admin" ? "selected" : ""}>Admins (${count("admin")})</option>
+              <option value="manager" ${f.role === "manager" ? "selected" : ""}>Managers (${count("manager")})</option>
+              <option value="employee" ${f.role === "employee" ? "selected" : ""}>Employees (${count("employee")})</option>
+            </select>
+          </div>
           <div class="table-wrap"><table>
             <thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Facility</th><th>Status</th><th></th></tr></thead>
             <tbody>${users.map((u) => `<tr>
@@ -1267,20 +1279,22 @@
               <td>${badge(u.active ? "active" : "inactive")}</td>
               <td class="actions"><button class="link small" data-reset="${u.id}">Send password reset</button>
                 <button class="link small" data-edit="${u.id}">Edit</button>
-                ${u.id === state.me.id ? "" : delBtn(u.id)}</td></tr>`).join("")}
+                ${u.id === state.me.id ? "" : delBtn(u.id)}</td></tr>`).join("")
+              || `<tr><td colspan="6" class="empty">No users with this role yet.</td></tr>`}
             </tbody></table></div>
         </div>`;
+      $$("[data-f]", view).forEach((inp) => inp.addEventListener("input", () => { f[inp.dataset.f] = inp.value; route(); }));
       $$("[data-edit]", view).forEach((b) => b.onclick = () => editUser(users.find((u) => u.id === b.dataset.edit)));
       $$("[data-del]", view).forEach((b) => b.onclick = async () => {
         const u = users.find((x) => x.id === b.dataset.del);
         if (!(await confirmBox(`Delete the login for ${u.full_name} (${u.email})? They will no longer be able to sign in. ` +
-          `Employees and training records are not affected.`))) return;
+          (u.role === "employee" ? "Their employee record, training and certificates are kept." : "Employees and training records are not affected.")))) return;
         try { await invokeFn("delete-user", { ids: [u.id] }); toast("User deleted"); route(); }
         catch (ex) { toast(ex.message, true); }
       });
       $$("[data-reset]", view).forEach((b) => b.onclick = async () => {
         const u = users.find((x) => x.id === b.dataset.reset);
-        const redirectTo = location.href.split("#")[0].replace(/[^/]*$/, "") + "index.html";
+        const redirectTo = location.href.split(/[?#]/)[0].replace(/[^/]*$/, "") + "index.html?setpw=1";
         const { error } = await sb.auth.resetPasswordForEmail(u.email, { redirectTo });
         toast(error ? error.message : `Reset email sent to ${u.email}`, !!error);
       });
@@ -1292,11 +1306,12 @@
     return `
       <div class="field"><label>Role *</label><select name="role" data-role>
         <option value="manager" ${u.role !== "admin" ? "selected" : ""}>Manager — one facility</option>
-        <option value="admin" ${u.role === "admin" ? "selected" : ""}>Admin — everything</option></select></div>
+        <option value="admin" ${u.role === "admin" ? "selected" : ""}>Admin — everything</option>
+        ${u.allowEmployee ? `<option value="employee">Employee — their own training only</option>` : ""}</select></div>
       <div class="field" data-facfield><label>Facility *</label><select name="facility_id">${facilityOptions(u.facility_id)}</select></div>`;
   }
   function wireRole(form) {
-    const sync = () => $("[data-facfield]", form).classList.toggle("hidden", $("[data-role]", form).value === "admin");
+    const sync = () => $("[data-facfield]", form).classList.toggle("hidden", $("[data-role]", form).value !== "manager");
     $("[data-role]", form).addEventListener("input", sync); sync();
   }
   function genPassword() {
@@ -1305,39 +1320,94 @@
     return Array.from(a, (n) => chars[n % chars.length]).join("");
   }
 
-  function addUser() {
+  async function addUser() {
     const pw = genPassword();
+    let emps = [], logins = new Map();
+    try { [emps, logins] = await Promise.all([loadEmployees({ activeOnly: true }), loadEmployeeLogins()]); }
+    catch (ex) { toast(ex.message, true); return; }
+    const free = emps.filter((e) => !logins.has(e.id));
     const { form } = openModal({
       title: "Add user", submitText: "Create user",
       body: `
         <div class="grid2">
-          <div class="field"><label>Full name *</label><input name="full_name" required></div>
-          <div class="field"><label>Email *</label><input name="email" type="email" required></div>
-          ${roleFields({ role: "manager", facility_id: state.facilities[0]?.id })}
+          ${roleFields({ role: "manager", facility_id: state.facilities[0]?.id, allowEmployee: true })}
         </div>
-        <div class="field"><label>Temporary password *</label>
-          <div style="display:flex;gap:.5rem"><input name="password" required minlength="8" value="${esc(pw)}">
+        <div data-emp-only class="hidden">
+          <div class="field"><label>Which employee? *</label>
+            <select name="employee_id" data-emp>
+              <option value="">Choose an employee…</option>
+              ${free.map((e) => `<option value="${e.id}" data-email="${esc(e.email || "")}">${esc(e.last_name)}, ${esc(e.first_name)} · ${esc(facilityName(e.facility_id))}</option>`).join("")}
+            </select>
+            <p class="muted" style="font-size:.85rem;margin:.3rem 0 0">${free.length} employees don't have a login yet. The login is linked to their employee record and home.</p></div>
+        </div>
+        <div class="grid2">
+          <div class="field" data-staff-only><label>Full name *</label><input name="full_name"></div>
+          <div class="field"><label>Email *</label><input name="email" type="email" required></div>
+        </div>
+        <div data-emp-only class="hidden">
+          <div class="field"><label>How will they get in?</label>
+            <div class="choices stacked">
+              <label class="choice"><input type="radio" name="mode" value="invite" checked> Email them an invite. They click the link and choose their own password.</label>
+              <label class="choice"><input type="radio" name="mode" value="password"> Set a temporary password now (no email is sent)</label>
+            </div></div>
+        </div>
+        <div class="field" data-pw><label>Temporary password *</label>
+          <div style="display:flex;gap:.5rem"><input name="password" minlength="8" value="${esc(pw)}">
           <button type="button" class="secondary" data-copy>Copy</button></div>
           <p class="muted" style="font-size:.85rem;margin:.3rem 0 0">Give this to the user privately. They can change it with “Forgot password?” on the sign-in page.</p></div>`,
       async onSubmit(d) {
-        const body = { full_name: d.full_name.trim(), email: d.email.trim().toLowerCase(), password: d.password,
-          role: d.role, facility_id: d.role === "admin" ? null : Number(d.facility_id) };
-        const { data, error } = await sb.functions.invoke("create-user", { body });
-        if (error) {
-          let msg = error.message;
-          try { const j = await error.context.json(); if (j.error) msg = j.error; } catch (_) { /* keep default */ }
-          throw new Error(msg.includes("Failed to send") ? "Could not reach the create-user function. Has it been deployed? (see README step 4)" : msg);
+        const email = d.email.trim().toLowerCase();
+        if (d.role === "employee") {
+          if (!d.employee_id) throw new Error("Choose which employee this login is for.");
+          const redirect_to = location.href.split(/[?#]/)[0].replace(/[^/]*$/, "") + "index.html?setpw=1";
+          await invokeFn("employee-access", { action: d.mode, employee_id: Number(d.employee_id), email, password: d.password, redirect_to });
+          toast(d.mode === "invite" ? `Invite sent to ${email}` : `Login created for ${email}`);
+        } else {
+          if (!d.full_name.trim()) throw new Error("Full name is required.");
+          if ((d.password || "").length < 8) throw new Error("Password must be at least 8 characters.");
+          await invokeFn("create-user", { full_name: d.full_name.trim(), email, password: d.password,
+            role: d.role, facility_id: d.role === "admin" ? null : Number(d.facility_id) });
+          toast(`User ${email} created`);
         }
-        if (data && data.error) throw new Error(data.error);
-        toast(`User ${body.email} created`); route();
+        route();
       }
     });
     wireRole(form);
+    const sync = () => {
+      const isEmp = form.role.value === "employee";
+      $$("[data-emp-only]", form).forEach((el) => el.classList.toggle("hidden", !isEmp));
+      $$("[data-staff-only]", form).forEach((el) => el.classList.toggle("hidden", isEmp));
+      const mode = (form.querySelector("input[name=mode]:checked") || {}).value;
+      $("[data-pw]", form).classList.toggle("hidden", isEmp && mode !== "password");
+    };
+    form.role.addEventListener("input", sync);
+    $$("input[name=mode]", form).forEach((r) => r.addEventListener("change", sync));
+    $("[data-emp]", form).addEventListener("input", (ev) => {
+      const opt = ev.target.selectedOptions[0];
+      if (opt && opt.dataset.email && !form.email.value) form.email.value = opt.dataset.email;
+    });
+    sync();
     $("[data-copy]", form).onclick = () => { navigator.clipboard?.writeText($("input[name=password]", form).value); toast("Password copied"); };
   }
 
   function editUser(u) {
     const self = u.id === state.me.id;
+    if (u.role === "employee") {
+      openModal({
+        title: "Edit employee login",
+        body: `
+          <p style="margin-top:0"><strong>${esc(u.full_name)}</strong><br><span class="muted">${esc(u.email)} · ${esc(facilityName(u.facility_id))}</span></p>
+          <p class="muted">This login belongs to an employee. To change their name, job or home, edit them on the
+            <a href="#employees">Employees</a> page.</p>
+          <div class="field"><label style="display:flex;gap:.5rem;align-items:center">
+            <input type="checkbox" name="active" ${u.active ? "checked" : ""}> Account active (can sign in)</label></div>`,
+        async onSubmit(d) {
+          check(await sb.from("profiles").update({ active: !!d.active }).eq("id", u.id));
+          toast("Login saved"); route();
+        }
+      });
+      return;
+    }
     const { form } = openModal({
       title: "Edit user",
       body: `
