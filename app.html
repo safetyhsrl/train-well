@@ -10,7 +10,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Figtree:wght@400;500;600;700&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="css/styles.css?v=20261020b">
+  <link rel="stylesheet" href="css/styles.css?v=20261020c">
 </head>
 <body>
   <div class="shell hidden" id="shell">
@@ -43,7 +43,16 @@
           <button class="secondary menu-toggle" id="menuBtn" type="button">☰</button>
           <h1 id="pageTitle">Dashboard</h1>
         </div>
-        <div id="pageActions" class="toolbar" style="margin:0"></div>
+        <div class="topbar-right">
+          <div id="pageActions" class="toolbar" style="margin:0"></div>
+          <div class="bell-wrap">
+            <button type="button" class="bell" id="bellBtn" aria-label="Notifications" aria-expanded="false" aria-controls="bellPanel">
+              <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path fill="currentColor" d="M12 22a2.5 2.5 0 0 0 2.45-2h-4.9A2.5 2.5 0 0 0 12 22Zm7-6V11a7 7 0 0 0-5.5-6.84V3.5a1.5 1.5 0 0 0-3 0v.66A7 7 0 0 0 5 11v5l-1.7 1.7A1 1 0 0 0 4 19.4h16a1 1 0 0 0 .7-1.7Z"/></svg>
+              <span class="bell-count hidden" id="bellCount"></span>
+            </button>
+            <div class="bell-panel hidden" id="bellPanel" role="dialog" aria-label="Notifications"></div>
+          </div>
+        </div>
       </div>
       <div id="view"></div>
     </main>
@@ -53,8 +62,8 @@
   <div id="toast" class="hidden"></div>
 
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
-  <script src="js/config.js?v=20261020b"></script>
-  <script src="js/client.js?v=20261020b"></script>
-  <script src="js/app.js?v=20261020b"></script>
+  <script src="js/config.js?v=20261020c"></script>
+  <script src="js/client.js?v=20261020c"></script>
+  <script src="js/app.js?v=20261020c"></script>
 </body>
 </html>
