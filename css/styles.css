@@ -269,3 +269,36 @@ button.photo-frame:hover { background: #e6eee8; border-color: var(--brand); }
   .profile-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .photo-pick { grid-template-columns: 1fr; }
 }
+
+/* ---------- Notifications bell ---------- */
+.topbar-right { display: flex; align-items: center; gap: .6rem; flex-wrap: wrap; }
+.bell-wrap { position: relative; }
+.bell { position: relative; width: 40px; height: 40px; padding: 0; justify-content: center; border-radius: 10px;
+  background: var(--surface); color: var(--brand-dark); border: 1px solid var(--border); }
+.bell:hover { background: var(--brand-soft); }
+.bell:focus-visible { outline: 3px solid rgba(1, 174, 242, .45); outline-offset: 2px; }
+.bell-count { position: absolute; top: -6px; right: -6px; min-width: 20px; height: 20px; padding: 0 5px; border-radius: 999px;
+  background: var(--bad); color: #fff; font-size: .72rem; font-weight: 700; display: grid; place-items: center; border: 2px solid var(--bg); }
+.bell-panel { position: absolute; right: 0; top: calc(100% + 8px); width: 380px; max-width: calc(100vw - 32px); z-index: 40;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 12px; box-shadow: 0 16px 40px rgba(10, 30, 20, .18); overflow: hidden; }
+.bell-head { display: flex; justify-content: space-between; align-items: baseline; padding: .8rem 1rem; border-bottom: 1px solid var(--border); }
+.bell-head .muted { font-size: .82rem; }
+.bell-list { max-height: min(70vh, 480px); overflow-y: auto; }
+.bell-item { display: flex; gap: .7rem; align-items: flex-start; width: 100%; text-align: left; padding: .75rem 1rem; border-radius: 0;
+  background: var(--surface); color: var(--text); font-weight: 400; border: 0; border-bottom: 1px solid var(--border); }
+.bell-item:last-child { border-bottom: 0; }
+.bell-item:hover { background: #f6f9f7; }
+.bell-item.is-new { background: #f3f9f5; }
+.bell-dot { flex: none; width: 9px; height: 9px; border-radius: 50%; margin-top: .4rem; background: var(--ocean); }
+.bell-item.bad .bell-dot { background: var(--bad); }
+.bell-item.warn .bell-dot { background: var(--warn); }
+.bell-text { display: grid; gap: .15rem; min-width: 0; }
+.bell-title { font-weight: 600; font-size: .92rem; }
+.bell-item.is-new .bell-title::after { content: "New"; margin-left: .45rem; font-size: .68rem; font-weight: 700; color: var(--brand);
+  background: var(--brand-soft); padding: .05rem .4rem; border-radius: 999px; vertical-align: 1px; }
+.bell-detail { font-size: .82rem; color: var(--muted); overflow-wrap: anywhere; }
+.bell-empty { margin: 0; padding: 1.4rem 1rem; color: var(--muted); text-align: center; }
+@media (max-width: 860px) {
+  .bell-panel { position: fixed; left: 16px; right: 16px; top: 64px; width: auto; max-width: none; }
+  .bell-panel .bell-list { max-height: 60vh; }
+}
