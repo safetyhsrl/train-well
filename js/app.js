@@ -321,12 +321,13 @@
         .select("id, facility_id, drill_date, event_type, q_meeting_area, q_fire_doors, q_windows_doors, q_staff_response, q_corridors_clear, q_pull_stations")
         .order("drill_date", { ascending: false });
       const thisYear = todayISO().slice(0, 4);
+      const sched = drillErr ? [] : await loadSchedule();
       const drillByFac = drillErr ? [] : state.facilities
         .filter((f) => isAdmin() || f.id === state.me.facility_id)
         .map((f) => {
           const ds = drillRows.filter((x) => x.facility_id === f.id);
           const last = ds[0];
-          return { f, last, year: ds.filter((x) => x.drill_date.startsWith(thisYear)).length,
+          return { f, last, next: sched.find((x) => x.facility_id === f.id), year: ds.filter((x) => x.drill_date.startsWith(thisYear)).length,
             days: last ? Math.round((new Date(todayISO()) - new Date(last.drill_date)) / 86400000) : null };
         });
 
@@ -373,13 +374,14 @@
           <div style="display:flex;justify-content:space-between;align-items:center;gap:1rem;flex-wrap:wrap">
             <h2 style="margin:0">Fire drills</h2><a href="#drills">Open Fire Drill →</a></div>
           <div class="table-wrap" style="margin-top:.6rem"><table>
-            <thead><tr><th>Home</th><th>Last drill</th><th>Days since</th><th>Last outcome</th><th>Drills in ${thisYear}</th></tr></thead>
+            <thead><tr><th>Home</th><th>Last drill</th><th>Days since</th><th>Last outcome</th><th>Drills in ${thisYear}</th><th>Next drill</th></tr></thead>
             <tbody>${drillByFac.map((r) => `
               <tr><td>${esc(r.f.name)}</td>
                 <td>${r.last ? fmtDate(r.last.drill_date) + (r.last.event_type === "alarm" ? " (alarm)" : "") : badge("missing", "None recorded")}</td>
                 <td>${r.days == null ? "—" : r.days}</td>
                 <td>${r.last ? (drillIssues(r.last) ? badge("expired", drillIssues(r.last) + (drillIssues(r.last) > 1 ? " issues" : " issue")) : badge("valid", "No issues")) : "—"}</td>
-                <td>${r.year}</td></tr>`).join("") || `<tr><td colspan="5" class="empty">No facilities yet.</td></tr>`}
+                <td>${r.year}</td>
+                <td>${r.next ? `${fmtDate(r.next.scheduled_date)} ${whenBadge(r.next.scheduled_date)}` : badge("neutral", "Not scheduled")}</td></tr>`).join("") || `<tr><td colspan="6" class="empty">No facilities yet.</td></tr>`}
             </tbody></table></div>
         </div>`}
 
@@ -1094,8 +1096,29 @@
       }
       const years = [...new Set(data.map((d) => d.drill_date.slice(0, 4)))].sort().reverse();
       const drills = data.filter((d) => !f.year || d.drill_date.startsWith(f.year));
+      const sched = (await loadSchedule()).filter((x) => !f.facility || String(x.facility_id) === f.facility);
       view.innerHTML = `
         <div class="card">
+          <div style="display:flex;justify-content:space-between;align-items:center;gap:1rem;flex-wrap:wrap;margin-bottom:.6rem">
+            <h2 style="margin:0">Upcoming fire drills</h2>
+            <button class="secondary small" data-sched-add>+ Schedule drill</button></div>
+          <div class="table-wrap"><table>
+            <thead><tr><th>Date</th><th>Home</th><th>Time</th><th>Planned activity</th><th>Coordinator</th><th>Notes</th><th></th></tr></thead>
+            <tbody>${sched.map((x) => `<tr>
+              <td><strong>${fmtDate(x.scheduled_date)}</strong><br><span style="display:inline-block;margin-top:.25rem">${whenBadge(x.scheduled_date)}</span></td>
+              <td>${esc(facilityName(x.facility_id))}</td>
+              <td>${hhmm(x.scheduled_time) || "—"}</td>
+              <td style="white-space:normal;min-width:10rem">${x.activity ? esc(DRILL_ACTIVITY_SHORT[x.activity]) : "—"}</td>
+              <td>${esc(x.coordinator || "—")}</td>
+              <td style="white-space:normal;min-width:8rem">${esc(x.notes || "—")}</td>
+              <td class="actions"><button class="small" data-sched-rec="${x.id}">Record drill</button>
+                <button class="link small" data-sched-edit="${x.id}">Edit</button>
+                <button class="link small" data-sched-del="${x.id}" style="color:var(--bad)">Delete</button></td></tr>`).join("")
+              || `<tr><td colspan="7" class="empty">No fire drills scheduled. Click <strong>Schedule drill</strong> to plan the next one.</td></tr>`}
+            </tbody></table></div>
+        </div>
+        <div class="card">
+          <h2>Fire drill reports</h2>
           <div class="toolbar">
             ${isAdmin() ? `<select data-f="facility">${facilityOptions(f.facility, { includeAll: true })}</select>` : ""}
             <select data-f="year"><option value="">All years</option>
@@ -1122,6 +1145,15 @@
         </div>`;
       $$("[data-f]", view).forEach((inp) => inp.addEventListener("input", () => { f[inp.dataset.f] = inp.value; route(); }));
       $$("[data-view]", view).forEach((b) => b.onclick = () => showDrill(Number(b.dataset.view)));
+      $("[data-sched-add]", view).onclick = () => editSchedule(null);
+      $$("[data-sched-edit]", view).forEach((b) => b.onclick = () => editSchedule(sched.find((x) => x.id === Number(b.dataset.schedEdit))));
+      $$("[data-sched-rec]", view).forEach((b) => b.onclick = () => editDrill(null, { schedule: sched.find((x) => x.id === Number(b.dataset.schedRec)) }));
+      $$("[data-sched-del]", view).forEach((b) => b.onclick = async () => {
+        const x = sched.find((y) => y.id === Number(b.dataset.schedDel));
+        if (!(await confirmBox(`Remove the fire drill scheduled for ${facilityName(x.facility_id)} on ${fmtDate(x.scheduled_date)}?`, { okText: "Remove" }))) return;
+        try { check(await sb.from("fire_drill_schedule").delete().eq("id", x.id)); toast("Scheduled drill removed"); route(); }
+        catch (ex) { toast(ex.message, true); }
+      });
       $$("[data-print]", view).forEach((b) => b.onclick = () => printDrill(Number(b.dataset.print)));
       $$("[data-edit]", view).forEach((b) => b.onclick = () => editDrill(Number(b.dataset.edit)));
       $$("[data-del]", view).forEach((b) => b.onclick = async () => {
@@ -1137,8 +1169,54 @@
     }
   };
 
-  async function editDrill(id) {
+  // ---- Scheduled fire drills (not yet recorded), soonest first
+  const DRILL_ACTIVITY_SHORT = { staff_only: "Staff only", full: "Full drill (residents and staff)", info_session: "Information session" };
+  async function loadSchedule() {
+    const { data, error } = await sb.from("fire_drill_schedule").select("*").is("drill_id", null).order("scheduled_date").order("scheduled_time", { nullsFirst: false });
+    return error ? [] : data;
+  }
+  function whenBadge(date) {
+    const days = Math.round((new Date(date + "T00:00:00") - new Date(todayISO() + "T00:00:00")) / 86400000);
+    if (days < 0) return badge("expired", `Overdue by ${-days} day${days === -1 ? "" : "s"}`);
+    if (days === 0) return badge("expiring", "Today");
+    if (days <= 7) return badge("expiring", days === 1 ? "Tomorrow" : `In ${days} days`);
+    return badge("neutral", `In ${days} days`);
+  }
+  function editSchedule(x) {
+    const isNew = !x;
+    x = x || { facility_id: state.me.facility_id || state.facilities[0]?.id };
+    const radio = (value, label) =>
+      `<label class="choice"><input type="radio" name="activity" value="${value}" ${x.activity === value ? "checked" : ""}> ${esc(label)}</label>`;
+    openModal({
+      title: isNew ? "Schedule a fire drill" : "Edit scheduled drill", submitText: isNew ? "Schedule drill" : "Save",
+      body: `
+        <div class="grid2">
+          <div class="field"><label>Home *</label>
+            <select name="facility_id" required ${isAdmin() ? "" : "disabled"}>${facilityOptions(x.facility_id)}</select></div>
+          <div class="field"><label>Date *</label><input type="date" name="scheduled_date" required value="${esc(x.scheduled_date)}" ${isNew ? `min="${todayISO()}"` : ""}></div>
+          <div class="field"><label>Time</label><input type="time" name="scheduled_time" value="${hhmm(x.scheduled_time)}"></div>
+          <div class="field"><label>Coordinator</label><input name="coordinator" value="${esc(x.coordinator)}"></div>
+        </div>
+        <div class="field"><label>Planned activity</label>
+          <div class="choices stacked">${Object.entries(DRILL_ACTIVITY).map(([k, v]) => radio(k, v)).join("")}</div></div>
+        <div class="field"><label>Notes</label><textarea name="notes" rows="2" placeholder="e.g. night shift drill, test new pull station">${esc(x.notes)}</textarea></div>`,
+      async onSubmit(v) {
+        const row = { facility_id: Number(isAdmin() ? v.facility_id : (x.facility_id || state.me.facility_id)), scheduled_date: v.scheduled_date,
+          scheduled_time: nn(v.scheduled_time), activity: nn(v.activity), coordinator: nn(v.coordinator), notes: nn(v.notes) };
+        const res = isNew ? await sb.from("fire_drill_schedule").insert({ ...row, created_by: state.me.id })
+          : await sb.from("fire_drill_schedule").update(row).eq("id", x.id);
+        if (res.error && /fire_drill_schedule|relation|schema cache/i.test(res.error.message))
+          throw new Error("Scheduling isn't set up yet. An administrator needs to run the drill-schedule update in Supabase (see README).");
+        check(res);
+        toast(isNew ? `Fire drill scheduled for ${fmtDate(row.scheduled_date)}` : "Scheduled drill saved"); route();
+      }
+    });
+  }
+
+  async function editDrill(id, { schedule = null } = {}) {
     let d = { facility_id: state.me.facility_id || state.facilities[0]?.id, drill_date: todayISO(), event_type: "drill", fire_drill_participants: [] };
+    if (schedule) Object.assign(d, { facility_id: schedule.facility_id, start_time: schedule.scheduled_time, activity: schedule.activity,
+      coordinator: schedule.coordinator, drill_date: schedule.scheduled_date <= todayISO() ? schedule.scheduled_date : todayISO() });
     let allEmps;
     try {
       if (id) d = await loadDrill(id);
@@ -1153,7 +1231,7 @@
       `<label class="choice"><input type="radio" name="${name}" value="${value}" ${cur === value ? "checked" : ""}> ${esc(label)}</label>`;
 
     const { form } = openModal({
-      title: isNew ? "Record fire drill" : "Edit fire drill report", wide: true, submitText: "Save report",
+      title: schedule ? `Record scheduled drill · ${facilityName(schedule.facility_id)}` : isNew ? "Record fire drill" : "Edit fire drill report", wide: true, submitText: "Save report",
       body: `
         <div class="grid2">
           <div class="field"><label>Name of home *</label>
@@ -1204,6 +1282,7 @@
           parts.push({ drill_id: drillId, employee_id: null, name: nm });
         if (!isNew) check(await sb.from("fire_drill_participants").delete().eq("drill_id", drillId));
         if (parts.length) check(await sb.from("fire_drill_participants").insert(parts));
+        if (schedule) await sb.from("fire_drill_schedule").update({ drill_id: drillId }).eq("id", schedule.id);
         toast(isNew ? "Fire drill recorded" : "Fire drill report saved"); route();
       }
     });
