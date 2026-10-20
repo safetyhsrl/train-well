@@ -371,7 +371,7 @@
         ${drillErr ? "" : `
         <div class="card">
           <div style="display:flex;justify-content:space-between;align-items:center;gap:1rem;flex-wrap:wrap">
-            <h2 style="margin:0">Fire drills</h2><a href="#drills">Open Fire Drilling →</a></div>
+            <h2 style="margin:0">Fire drills</h2><a href="#drills">Open Fire Drill →</a></div>
           <div class="table-wrap" style="margin-top:.6rem"><table>
             <thead><tr><th>Home</th><th>Last drill</th><th>Days since</th><th>Last outcome</th><th>Drills in ${thisYear}</th></tr></thead>
             <tbody>${drillByFac.map((r) => `
@@ -1066,7 +1066,7 @@
   const fmtMinutes = (m) => (m == null ? "—" : m >= 60 ? `${Math.floor(m / 60)} h ${m % 60} min` : `${m} min`);
   const drillIssues = (d) => DRILL_PROBLEM_QS.filter((k) => d[k] === "no").length;
   const drillNotSetUp = (error) =>
-    `<div class="card"><h2>Fire Drilling isn't set up yet</h2>
+    `<div class="card"><h2>Fire Drill isn't set up yet</h2>
       <p>An administrator needs to run <code>supabase/update-2026-10-fire-drills.sql</code> once in the Supabase SQL Editor (see README).</p>
       <p class="muted" style="font-size:.85rem">${esc(error.message)}</p></div>`;
 
@@ -1075,7 +1075,7 @@
   }
 
   views.drills = {
-    title: "Fire Drilling",
+    title: "Fire Drill",
     filters: { facility: "", year: "" },
     actions() {
       return `<button class="secondary" data-act="excel">Download Excel</button>
@@ -1089,7 +1089,7 @@
       const { data, error } = await q;
       if (error) {
         view.innerHTML = drillNotSetUp(error);
-        this.onAction = () => toast("Fire Drilling isn't set up yet. See the message on the page.", true);
+        this.onAction = () => toast("Fire Drill isn't set up yet. See the message on the page.", true);
         return;
       }
       const years = [...new Set(data.map((d) => d.drill_date.slice(0, 4)))].sort().reverse();
@@ -1350,14 +1350,14 @@
         <div class="card">
           ${isAdmin() ? "" : `<p class="muted" style="margin-top:0">Courses are managed by your administrator.</p>`}
           <div class="table-wrap"><table>
-            <thead><tr><th>Code</th><th>Title</th><th>Category</th><th>Hours</th><th>Valid for</th><th>Mandatory</th><th>Status</th><th></th></tr></thead>
+            <thead><tr><th>Title</th><th>Category</th><th>Hours</th><th>Valid for</th><th>Mandatory</th><th>Status</th><th></th></tr></thead>
             <tbody>${state.courses.map((c) => `<tr>
-              <td>${esc(c.code || "—")}</td><td>${esc(c.title)}</td><td>${esc(c.category || "—")}</td>
+              <td>${esc(c.title)}</td><td>${esc(c.category || "—")}</td>
               <td>${c.duration_hours ?? "—"}</td><td>${c.validity_months ? c.validity_months + " months" : "No expiry"}</td>
               <td>${c.mandatory ? badge("admin", "Mandatory") : badge("neutral", "Optional")}</td>
               <td>${badge(c.active ? "active" : "inactive")}</td>
               <td class="actions">${isAdmin() ? `<button class="link small" data-edit="${c.id}">Edit</button> ${delBtn(c.id)}` : ""}</td></tr>`).join("")
-              || `<tr><td colspan="8" class="empty">No courses yet.</td></tr>`}
+              || `<tr><td colspan="7" class="empty">No courses yet.</td></tr>`}
             </tbody></table></div>
         </div>`;
       $$("[data-edit]", view).forEach((b) => b.onclick = () => editCourse(state.courses.find((c) => c.id === Number(b.dataset.edit))));
@@ -1384,7 +1384,6 @@
       body: `
         <div class="grid2">
           <div class="field"><label>Title *</label><input name="title" required value="${esc(c.title)}"></div>
-          <div class="field"><label>Code</label><input name="code" value="${esc(c.code)}"></div>
           <div class="field"><label>Category</label><input name="category" value="${esc(c.category)}" placeholder="Safety, Onboarding…"></div>
           <div class="field"><label>Duration (hours)</label><input type="number" step="0.25" min="0" name="duration_hours" value="${esc(c.duration_hours)}"></div>
           <div class="field"><label>Valid for (months) <span class="muted">blank = never expires</span></label><input type="number" min="1" name="validity_months" value="${esc(c.validity_months)}"></div>
@@ -1393,7 +1392,7 @@
         <div class="field"><label style="display:flex;gap:.5rem;align-items:center"><input type="checkbox" name="mandatory" ${c.mandatory ? "checked" : ""}> Mandatory for all active employees</label></div>
         <div class="field"><label style="display:flex;gap:.5rem;align-items:center"><input type="checkbox" name="active" ${c.active ? "checked" : ""}> Active</label></div>`,
       async onSubmit(d) {
-        const row = { title: d.title.trim(), code: nn(d.code), category: nn(d.category), duration_hours: nn(d.duration_hours),
+        const row = { title: d.title.trim(), category: nn(d.category), duration_hours: nn(d.duration_hours),
           validity_months: nn(d.validity_months), description: nn(d.description), mandatory: !!d.mandatory, active: !!d.active };
         if (isNew) check(await sb.from("courses").insert(row));
         else check(await sb.from("courses").update(row).eq("id", c.id));
