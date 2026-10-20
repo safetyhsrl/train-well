@@ -1974,6 +1974,115 @@
     catch (ex) { toast(ex.message, true); }
   }
 
+  // ============================================================== NOTIFICATIONS (bell)
+  // Worked out from the live data each time a page loads. "Seen" is remembered per person on this device.
+  const seenKey = () => `trainwell.seen.${state.me.id}`;
+  const seenGet = () => { try { return new Set(JSON.parse(localStorage.getItem(seenKey()) || "[]")); } catch (_) { return new Set(); } };
+  const seenPut = (set) => { try { localStorage.setItem(seenKey(), JSON.stringify([...set].slice(-400))); } catch (_) { /* private mode */ } };
+  let bellNotes = [], bellRun = 0;
+  const goTo = (hash) => { if (location.hash === hash) route(); else location.hash = hash; };
+  const namesPreview = (list) => {
+    const shown = list.slice(0, 3).map((i) => `${fullName(i.employee)} (${i.course.title})`).join(", ");
+    return list.length > 3 ? `${shown} and ${list.length - 3} more` : shown;
+  };
+
+  async function buildNotifications() {
+    const notes = [];
+    const today = todayISO(), soon = addDaysISO(7);
+    if (isEmployee()) {
+      const { rows } = await loadMyTraining();
+      for (const r of rows.filter((x) => x.course.mandatory && x.status !== "valid")) {
+        const when = r.rec?.expires_on ? fmtDate(r.rec.expires_on) : "";
+        notes.push({
+          key: `my:${r.course.id}:${r.status}:${r.rec?.expires_on || ""}`, level: r.status === "expiring" ? "warn" : "bad",
+          title: r.status === "expired" ? `${r.course.title} has expired` : r.status === "expiring" ? `${r.course.title} expires ${when}` : `${r.course.title} still to complete`,
+          detail: "Upload your certificate once it's done.", go: () => goTo("#my")
+        });
+      }
+      const { data: sess } = await sb.from("sessions").select("id, starts_at, course_id, location").gte("starts_at", new Date().toISOString()).order("starts_at");
+      for (const x of (sess || []).filter((y) => y.starts_at.slice(0, 10) <= soon))
+        notes.push({ key: `sess:${x.id}`, level: "info", title: `${courseTitle(x.course_id)} on ${fmtDateTime(x.starts_at)}`,
+          detail: x.location ? `Location: ${x.location}` : "Training session you're booked into.", go: () => goTo("#mysessions") });
+      return notes;
+    }
+
+    // Managers and admins
+    const { items } = await complianceMatrix(await loadEmployees({ activeOnly: true }));
+    const group = (status) => items.filter((i) => i.status === status).sort((a, b) => String(a.expires_on).localeCompare(String(b.expires_on)));
+    const sig = (list) => list.map((i) => `${i.employee.id}.${i.course.id}.${i.expires_on || ""}`).join("|");
+    const openOne = (list, fallback) => () => (list.length === 1 ? showEmployee(list[0].employee.id) : goTo(fallback));
+    const expired = group("expired"), expiring = group("expiring"), missing = group("missing");
+    if (expired.length) notes.push({ key: `exp:${sig(expired)}`, level: "bad",
+      title: `${expired.length} training record${expired.length > 1 ? "s have" : " has"} expired`, detail: namesPreview(expired), go: openOne(expired, "#dashboard") });
+    if (expiring.length) notes.push({ key: `soon:${sig(expiring)}`, level: "warn",
+      title: `${expiring.length} expiring in the next ${WARN_DAYS} days`, detail: namesPreview(expiring), go: openOne(expiring, "#dashboard") });
+
+    const sched = await loadSchedule();
+    for (const x of sched.filter((y) => y.scheduled_date < today))
+      notes.push({ key: `drill-late:${x.id}`, level: "bad", title: `Fire drill overdue at ${facilityName(x.facility_id)}`,
+        detail: `Scheduled for ${fmtDate(x.scheduled_date)}. Record it once it's done.`, go: () => goTo("#drills") });
+    for (const x of sched.filter((y) => y.scheduled_date >= today && y.scheduled_date <= soon)) {
+      const days = Math.round((new Date(x.scheduled_date + "T00:00:00") - new Date(today + "T00:00:00")) / 86400000);
+      notes.push({ key: `drill-soon:${x.id}:${x.scheduled_date}`, level: days <= 1 ? "warn" : "info",
+        title: `Fire drill ${days === 0 ? "today" : days === 1 ? "tomorrow" : `in ${days} days`} at ${facilityName(x.facility_id)}`,
+        detail: `${fmtDate(x.scheduled_date)}${x.scheduled_time ? " at " + hhmm(x.scheduled_time) : ""}${x.coordinator ? " · " + x.coordinator : ""}`, go: () => goTo("#drills") });
+    }
+
+    const since = new Date(Date.now() - 14 * 86400000).toISOString();
+    const { data: ups } = await sb.from("completions").select("id, course_id, created_at, employee_id, employees(first_name, last_name)")
+      .eq("uploaded_by_employee", true).gte("created_at", since).order("created_at", { ascending: false }).limit(20);
+    for (const u of ups || [])
+      notes.push({ key: `up:${u.id}`, level: "info", title: `${fullName(u.employees)} uploaded a certificate`,
+        detail: `${courseTitle(u.course_id)} · ${fmtDate(u.created_at)}`, go: () => showEmployee(u.employee_id) });
+
+    if (missing.length) notes.push({ key: `miss:${sig(missing)}`, level: "info",
+      title: `${missing.length} mandatory course${missing.length > 1 ? "s" : ""} never completed`, detail: namesPreview(missing), go: openOne(missing, "#dashboard") });
+    return notes;
+  }
+
+  async function refreshBell() {
+    const run = ++bellRun;
+    let notes;
+    try { notes = await buildNotifications(); } catch (_) { return; }
+    if (run !== bellRun) return; // a newer refresh has started
+    bellNotes = notes;
+    const seen = seenGet(), unseen = notes.filter((n) => !seen.has(n.key)).length;
+    const c = $("#bellCount");
+    c.textContent = unseen > 9 ? "9+" : String(unseen);
+    c.classList.toggle("hidden", !unseen);
+    $("#bellBtn").setAttribute("aria-label", unseen ? `Notifications, ${unseen} new` : "Notifications");
+    if (!$("#bellPanel").classList.contains("hidden")) drawBell(seen);
+  }
+
+  function drawBell(seen = seenGet()) {
+    const panel = $("#bellPanel");
+    panel.innerHTML = `
+      <div class="bell-head"><strong>Notifications</strong><span class="muted">${bellNotes.length ? bellNotes.length + " active" : ""}</span></div>
+      <div class="bell-list">${bellNotes.map((n, i) => `
+        <button type="button" class="bell-item ${n.level} ${seen.has(n.key) ? "" : "is-new"}" data-note="${i}">
+          <span class="bell-dot" aria-hidden="true"></span>
+          <span class="bell-text"><span class="bell-title">${esc(n.title)}</span><span class="bell-detail">${esc(n.detail)}</span></span>
+        </button>`).join("") || `<p class="bell-empty">You're all caught up. Nothing needs attention right now.</p>`}</div>`;
+    $$("[data-note]", panel).forEach((b) => b.onclick = () => { closeBell(); bellNotes[Number(b.dataset.note)].go(); });
+  }
+  function openBell() {
+    const seen = seenGet();
+    drawBell(seen);                      // new items keep their highlight while the panel is open
+    const panel = $("#bellPanel");
+    panel.style.top = matchMedia("(max-width: 860px)").matches ? `${Math.round($("#bellBtn").getBoundingClientRect().bottom + 8)}px` : "";
+    panel.classList.remove("hidden");
+    $("#bellBtn").setAttribute("aria-expanded", "true");
+    bellNotes.forEach((n) => seen.add(n.key)); seenPut(seen);
+    $("#bellCount").classList.add("hidden");
+  }
+  function closeBell() {
+    $("#bellPanel").classList.add("hidden");
+    $("#bellBtn").setAttribute("aria-expanded", "false");
+  }
+  $("#bellBtn").addEventListener("click", (e) => { e.stopPropagation(); $("#bellPanel").classList.contains("hidden") ? openBell() : closeBell(); });
+  document.addEventListener("click", (e) => { if (!e.target.closest(".bell-wrap")) closeBell(); });
+  document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeBell(); });
+
   // ============================================================== ROUTER
   let currentView = null;
   async function route() {
@@ -1994,6 +2103,7 @@
     view.innerHTML = `<div class="card empty">Loading…</div>`;
     try { await v.render(view); }
     catch (ex) { view.innerHTML = `<div class="alert error">Couldn't load this page: ${esc(ex.message)}</div>`; }
+    refreshBell();
   }
 
   $("#pageActions").addEventListener("click", (e) => {
