@@ -424,6 +424,7 @@
       const all = await loadEmployees();
       const { map } = await complianceMatrix(all);
       const logins = await loadEmployeeLogins();
+      const photo = await photoUrls(all.map((e) => e.photo_path));
       const mandatory = state.courses.filter((c) => c.mandatory && c.active);
       const f = this.filters;
 
@@ -460,7 +461,7 @@
         $("[data-rows]", view).innerHTML = rows.map((e) => {
           const g = e.status === "active" ? gaps(e) : null;
           return `<tr>
-            <td><button class="link" data-view="${e.id}">${esc(fullName(e))}</button></td>
+            <td><button class="link person" data-view="${e.id}">${avatar(e, photo(e.photo_path))}<span>${esc(fullName(e))}</span></button></td>
             <td>${esc(e.job_title || "—")}</td><td>${esc(e.department || "—")}</td>
             <td>${esc(facilityName(e.facility_id))}</td><td>${badge(e.status)}</td>
             <td>${g === null ? "—" : g === 0 ? badge("valid", "Up to date") : badge("expired", g + " outstanding")}</td>
@@ -474,7 +475,10 @@
           const e = all.find((x) => x.id === Number(b.dataset.del));
           if (!(await confirmBox(`Delete ${fullName(e)}? Their training records and attendance will also be deleted. ` +
             `(To keep their history, Edit them and set Status to Inactive instead.)`))) return;
-          try { check(await sb.from("employees").delete().eq("id", e.id)); toast("Employee deleted"); route(); }
+          try {
+            if (e.photo_path) await sb.storage.from(PHOTO_BUCKET).remove([e.photo_path]);
+            check(await sb.from("employees").delete().eq("id", e.id)); toast("Employee deleted"); route();
+          }
           catch (ex) { toast(ex.message, true); }
         });
       };
@@ -511,7 +515,9 @@
           <div class="field"><label>Status</label><select name="status">
             <option value="active" ${e.status === "active" ? "selected" : ""}>Active</option>
             <option value="inactive" ${e.status === "inactive" ? "selected" : ""}>Inactive</option></select></div>
-        </div>`,
+        </div>
+        <div class="field"><label>${e.photo_path ? "Replace photo" : "Photo"} <span class="muted">optional · JPG, PNG or HEIC</span></label>
+          <input type="file" name="photo" accept="image/*"></div>`,
       async onSubmit(d) {
         const row = {
           first_name: d.first_name.trim(), last_name: d.last_name.trim(),
@@ -519,8 +525,15 @@
           job_title: nn(d.job_title), department: nn(d.department), email: nn(d.email), phone: nn(d.phone),
           hire_date: nn(d.hire_date), status: d.status
         };
-        if (isNew) check(await sb.from("employees").insert(row));
+        const frm = $("#modalRoot form");
+        let saved = e;
+        if (isNew) saved = check(await sb.from("employees").insert(row).select().single());
         else check(await sb.from("employees").update(row).eq("id", e.id));
+        const pic = $("input[name=photo]", frm).files[0];
+        if (pic) {
+          try { await setEmployeePhoto(saved, pic); }
+          catch (ex) { toast(`${isNew ? "Employee added" : "Details saved"}, but the photo wasn't: ${ex.message}`, true); route(); return; }
+        }
         toast(isNew ? "Employee added" : "Employee saved"); route();
       }
     });
@@ -581,19 +594,55 @@
     for (const c of comps) if (!latest.has(c.course_id)) latest.set(c.course_id, c);
     const mandatory = state.courses.filter((c) => c.mandatory && c.active);
     const login = (await loadEmployeeLogins()).get(e.id);
+    const photoUrl = (await photoUrls([e.photo_path]))(e.photo_path);
+    // Sessions and fire drills are extras: show the rest of the profile even if these can't load
+    const att = (await sb.from("attendance").select("status, sessions(starts_at, course_id, location, trainer)").eq("employee_id", id)).data || [];
+    att.sort((x, y) => String(y.sessions?.starts_at).localeCompare(String(x.sessions?.starts_at)));
+    const drills = ((await sb.from("fire_drill_participants").select("drill_id, fire_drills(drill_date, event_type, start_time, facility_id, coordinator)").eq("employee_id", id)).data || [])
+      .filter((d) => d.fire_drills).sort((x, y) => y.fire_drills.drill_date.localeCompare(x.fire_drills.drill_date));
+
+    const mStatus = mandatory.map((c) => { const l = latest.get(c.id); return l ? expiryStatus(l.expires_on) : "missing"; });
+    const count = (s) => mStatus.filter((x) => x === s).length;
+    const detail = (label, value) => `<div><dt>${label}</dt><dd>${value || '<span class="muted">—</span>'}</dd></div>`;
 
     const { form } = openModal({
-      title: fullName(e), wide: true,
+      title: "Employee profile", wide: true,
       body: `
-        <p class="muted" style="margin-top:0">${esc([e.job_title, e.department, facilityName(e.facility_id)].filter(Boolean).join(" · "))}
-          ${e.hire_date ? " · Hired " + fmtDate(e.hire_date) : ""} · ${badge(e.status)}</p>
+        <section class="profile">
+          <div class="profile-photo">
+            ${photoUrl
+              ? `<button type="button" class="photo-frame" data-fullphoto title="Open full size"><img src="${esc(photoUrl)}" alt="Photo of ${esc(fullName(e))}"></button>`
+              : `<div class="photo-frame photo-frame--empty"><span>${esc(initials(e))}</span><small>No photo yet</small></div>`}
+            <div class="photo-actions">
+              <button type="button" class="secondary small" data-photo>${photoUrl ? "Change photo" : "Add photo"}</button>
+              ${photoUrl ? `<button type="button" class="link small" data-rmphoto style="color:var(--bad)">Remove</button>` : ""}
+            </div>
+          </div>
+          <div class="profile-main">
+            <h2 class="profile-name">${esc(fullName(e))}</h2>
+            <p class="profile-role">${esc([e.job_title, e.department].filter(Boolean).join(", ") || "No job title set")}</p>
+            <p class="profile-tags">${badge(e.status, e.status === "active" ? "Active" : "Inactive")} ${badge("neutral", facilityName(e.facility_id))}</p>
+            <dl class="profile-details">
+              ${detail("Email", e.email ? `<a href="mailto:${esc(e.email)}">${esc(e.email)}</a>` : "")}
+              ${detail("Phone", e.phone ? `<a href="tel:${esc(e.phone)}">${esc(e.phone)}</a>` : "")}
+              ${detail("Hire date", e.hire_date ? fmtDate(e.hire_date) : "")}
+              ${isAdmin() ? detail("App login", login ? esc(login.email) : "None") : ""}
+            </dl>
+            <div class="profile-summary">
+              <div class="ok"><strong>${count("valid")}</strong><span>Up to date</span></div>
+              <div class="warn"><strong>${count("expiring")}</strong><span>Due in ${WARN_DAYS} days</span></div>
+              <div class="bad"><strong>${count("expired")}</strong><span>Expired</span></div>
+              <div class="bad"><strong>${count("missing")}</strong><span>Never done</span></div>
+            </div>
+          </div>
+        </section>
         ${isAdmin() ? `<div class="alert info" style="display:flex;justify-content:space-between;align-items:center;gap:1rem;flex-wrap:wrap">
           <span>${login ? `App login: <strong>${esc(login.email)}</strong>` : "No app login yet. Give them one so they can see their training and upload certificates."}</span>
           ${login ? `<button type="button" class="secondary small" data-rmlogin>Remove login</button>` : `<button type="button" class="small" data-givelogin>Give login</button>`}</div>` : ""}
         <h3>Mandatory training</h3>
         <div class="table-wrap"><table><thead><tr><th>Course</th><th>Status</th><th>Completed</th><th>Expires</th></tr></thead><tbody>
-          ${mandatory.map((c) => { const l = latest.get(c.id); const s = l ? expiryStatus(l.expires_on) : "missing";
-            return `<tr><td>${esc(c.title)}</td><td>${badge(s)}</td><td>${fmtDate(l?.completed_on)}</td><td>${fmtDate(l?.expires_on)}</td></tr>`; }).join("")
+          ${mandatory.map((c, i) => { const l = latest.get(c.id);
+            return `<tr><td>${esc(c.title)}</td><td>${badge(mStatus[i])}</td><td>${fmtDate(l?.completed_on)}</td><td>${fmtDate(l?.expires_on)}</td></tr>`; }).join("")
             || `<tr><td colspan="4" class="empty">No mandatory courses set up.</td></tr>`}
         </tbody></table></div>
         <h3 style="margin-top:1.2rem">Full training history</h3>
@@ -602,6 +651,21 @@
             <td>${fmtDate(c.expires_on)} ${c.expires_on ? badge(expiryStatus(c.expires_on)) : ""}</td>
             <td>${c.score ?? "—"}</td><td>${esc(c.certificate_no || "—")}</td><td>${certLink(c)}</td></tr>`).join("")
             || `<tr><td colspan="6" class="empty">No training recorded yet.</td></tr>`}
+        </tbody></table></div>
+        <h3 style="margin-top:1.2rem">Sessions</h3>
+        <div class="table-wrap"><table><thead><tr><th>Date</th><th>Course</th><th>Location</th><th>Trainer</th><th>Attendance</th></tr></thead><tbody>
+          ${att.filter((a) => a.sessions).map((a) => `<tr><td>${fmtDateTime(a.sessions.starts_at)}</td><td>${esc(courseTitle(a.sessions.course_id))}</td>
+            <td>${esc(a.sessions.location || "—")}</td><td>${esc(a.sessions.trainer || "—")}</td>
+            <td>${badge(a.status, a.status[0].toUpperCase() + a.status.slice(1))}</td></tr>`).join("")
+            || `<tr><td colspan="5" class="empty">Not booked into any sessions.</td></tr>`}
+        </tbody></table></div>
+        <h3 style="margin-top:1.2rem">Fire drills</h3>
+        <div class="table-wrap"><table><thead><tr><th>Date</th><th>Type</th><th>Home</th><th>Coordinator</th><th></th></tr></thead><tbody>
+          ${drills.map((d) => `<tr><td>${fmtDate(d.fire_drills.drill_date)}</td>
+            <td>${d.fire_drills.event_type === "alarm" ? badge("expiring", "Fire alarm") : badge("neutral", "Fire drill")}</td>
+            <td>${esc(facilityName(d.fire_drills.facility_id))}</td><td>${esc(d.fire_drills.coordinator || "—")}</td>
+            <td class="actions"><button type="button" class="link small" data-drill="${d.drill_id}">View report</button></td></tr>`).join("")
+            || `<tr><td colspan="5" class="empty">Not listed on any fire drill yet.</td></tr>`}
         </tbody></table></div>`,
       footer: `<div class="modal-foot">
         <button type="button" class="secondary" data-edit>Edit details</button>
@@ -613,7 +677,97 @@
     $("[data-upload]", form).onclick = () => uploadCertificate({ employeeId: e.id, title: `Upload certificate for ${fullName(e)}` });
     $("[data-givelogin]", form)?.addEventListener("click", () => giveLogin(e));
     $("[data-rmlogin]", form)?.addEventListener("click", () => removeLogin(e));
+    $("[data-photo]", form).onclick = () => uploadPhoto(e);
+    $("[data-fullphoto]", form)?.addEventListener("click", () => openPhoto(e.photo_path));
+    $("[data-rmphoto]", form)?.addEventListener("click", async () => {
+      if (!(await confirmBox(`Remove ${fullName(e)}'s photo?`, { okText: "Remove photo" }))) { showEmployee(e.id); return; }
+      try { await removeEmployeePhoto(e); toast("Photo removed"); }
+      catch (ex) { toast(ex.message, true); }
+      showEmployee(e.id); if (currentView === views.employees) route();
+    });
+    $$("[data-drill]", form).forEach((b) => b.onclick = () => showDrill(Number(b.dataset.drill)));
     wireCerts(form);
+  }
+
+  // =============================================================== EMPLOYEE PHOTOS
+  // Private "employee-photos" bucket, files stored as  <employee id>/<time>.jpg
+  const PHOTO_BUCKET = "employee-photos";
+  const photoCache = new Map(); // path -> { url, at }
+  async function photoUrls(paths) {
+    const fresh = (p) => photoCache.has(p) && Date.now() - photoCache.get(p).at < 50 * 60 * 1000;
+    const need = [...new Set(paths.filter((p) => p && !fresh(p)))];
+    for (let i = 0; i < need.length; i += 100) {
+      const { data } = await sb.storage.from(PHOTO_BUCKET).createSignedUrls(need.slice(i, i + 100), 3600);
+      (data || []).forEach((d) => { if (d.signedUrl) photoCache.set(d.path, { url: d.signedUrl, at: Date.now() }); });
+    }
+    return (p) => (p && photoCache.get(p)?.url) || "";
+  }
+  const initials = (e) => `${(e.first_name || "")[0] || ""}${(e.last_name || "")[0] || ""}`.toUpperCase();
+  const avatar = (e, url) => url
+    ? `<img class="avatar" src="${esc(url)}" alt="" loading="lazy">`
+    : `<span class="avatar avatar--empty" aria-hidden="true">${esc(initials(e))}</span>`;
+
+  // Phone photos are often 5–15 MB; shrink to at most 1200 px on the long side before upload
+  async function shrinkPhoto(file) {
+    if (!/^image\//.test(file.type) && !/\.(jpe?g|png|webp|heic|heif)$/i.test(file.name)) throw new Error("Choose a photo (JPG, PNG or HEIC).");
+    let img;
+    try { img = await createImageBitmap(file, { imageOrientation: "from-image" }); }
+    catch (_) { throw new Error("This photo can't be opened in this browser. Save it as a JPG or PNG and try again."); }
+    const scale = Math.min(1, 1200 / Math.max(img.width, img.height));
+    const c = document.createElement("canvas");
+    c.width = Math.round(img.width * scale); c.height = Math.round(img.height * scale);
+    const ctx = c.getContext("2d"); ctx.fillStyle = "#fff"; ctx.fillRect(0, 0, c.width, c.height);
+    ctx.drawImage(img, 0, 0, c.width, c.height);
+    return new Promise((res, rej) => c.toBlob((b) => b ? res(b) : rej(new Error("Could not read that photo.")), "image/jpeg", 0.86));
+  }
+  async function setEmployeePhoto(e, file) {
+    const blob = await shrinkPhoto(file);
+    const path = `${e.id}/${Date.now()}.jpg`;
+    const { error } = await sb.storage.from(PHOTO_BUCKET).upload(path, blob, { contentType: "image/jpeg", upsert: false });
+    if (error) throw new Error(/bucket/i.test(error.message)
+      ? "Photo uploads aren't set up yet. An administrator needs to run the employee-photos update in Supabase (see README)." : error.message);
+    const { error: e2 } = await sb.from("employees").update({ photo_path: path }).eq("id", e.id);
+    if (e2) { await sb.storage.from(PHOTO_BUCKET).remove([path]); throw new Error(e2.message); }
+    if (e.photo_path) await sb.storage.from(PHOTO_BUCKET).remove([e.photo_path]);
+    e.photo_path = path;
+  }
+  async function removeEmployeePhoto(e) {
+    check(await sb.from("employees").update({ photo_path: null }).eq("id", e.id));
+    if (e.photo_path) await sb.storage.from(PHOTO_BUCKET).remove([e.photo_path]);
+    e.photo_path = null;
+  }
+  async function openPhoto(path) {
+    const url = (await photoUrls([path]))(path);
+    if (url) window.open(url, "_blank", "noopener");
+  }
+  function uploadPhoto(e) {
+    const { form } = openModal({
+      title: `${e.photo_path ? "Change" : "Add"} photo · ${fullName(e)}`, submitText: "Save photo",
+      body: `
+        <div class="photo-pick">
+          <div class="photo-frame photo-frame--empty" data-prev><span>${esc(initials(e))}</span><small>Preview</small></div>
+          <div>
+            <div class="field"><label>Photo *</label><input type="file" name="file" accept="image/*" required></div>
+            <p class="muted" style="font-size:.85rem;margin:0">JPG, PNG or HEIC. On a phone you can take one now. The whole photo is kept; large photos are made smaller automatically.</p>
+          </div>
+        </div>`,
+      async onSubmit(_d, frm) {
+        const file = $("input[type=file]", frm).files[0];
+        if (!file) throw new Error("Choose a photo.");
+        await setEmployeePhoto(e, file);
+        toast("Photo saved");
+        if (currentView === views.employees) route();
+        setTimeout(() => showEmployee(e.id), 0);
+      }
+    });
+    const inp = $("input[type=file]", form);
+    inp.onchange = () => {
+      const f = inp.files[0]; if (!f) return;
+      const prev = $("[data-prev]", form);
+      prev.className = "photo-frame";
+      prev.innerHTML = `<img alt="Preview" src="${URL.createObjectURL(f)}">`;
+      $("img", prev).onerror = () => { prev.className = "photo-frame photo-frame--empty"; prev.innerHTML = "<span>?</span><small>No preview, but it may still upload</small>"; };
+    };
   }
 
   // -------------------------------------------------------- records
