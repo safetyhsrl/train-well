@@ -13,6 +13,15 @@ const cors = {
   "Access-Control-Allow-Methods": "POST, OPTIONS",
 };
 
+// Works with both the classic and the newer Supabase key settings
+function envKey(classic: string, modern: string): string {
+  const v = Deno.env.get(classic);
+  if (v) return v;
+  const raw = Deno.env.get(modern) ?? "";
+  try { const j = JSON.parse(raw); return typeof j === "string" ? j : String(Object.values(j)[0] ?? ""); }
+  catch { return raw; }
+}
+
 const json = (body: unknown, status = 200) =>
   new Response(JSON.stringify(body), { status, headers: { ...cors, "Content-Type": "application/json" } });
 
@@ -21,16 +30,14 @@ Deno.serve(async (req) => {
   if (req.method !== "POST") return json({ error: "Method not allowed" }, 405);
 
   const url = Deno.env.get("SUPABASE_URL")!;
-  const anonKey = Deno.env.get("SUPABASE_ANON_KEY")!;
-  const serviceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
+  const serviceKey = envKey("SUPABASE_SERVICE_ROLE_KEY", "SUPABASE_SECRET_KEYS");
+  const admin = createClient(url, serviceKey, { auth: { persistSession: false } });
 
-  // 1. Who is calling? Must be a signed-in, active admin.
-  const authHeader = req.headers.get("Authorization") ?? "";
-  const caller = createClient(url, anonKey, { global: { headers: { Authorization: authHeader } } });
-  const { data: { user }, error: userErr } = await caller.auth.getUser();
+  // Who is calling? (checked with the secure key)
+  const token = (req.headers.get("Authorization") ?? "").replace(/^Bearer\s+/i, "");
+  const { data: { user }, error: userErr } = await admin.auth.getUser(token);
   if (userErr || !user) return json({ error: "Not signed in." }, 401);
 
-  const admin = createClient(url, serviceKey, { auth: { persistSession: false } });
   const { data: me } = await admin.from("profiles").select("role, active").eq("id", user.id).maybeSingle();
   if (!me || me.role !== "admin" || !me.active) return json({ error: "Only administrators can add users." }, 403);
 
