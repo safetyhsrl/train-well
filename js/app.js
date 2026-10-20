@@ -1425,18 +1425,20 @@
     actions() { return isAdmin() ? `<button data-act="add">+ Add course</button>` : ""; },
     async render(view) {
       await loadLookups();
+      const content = await courseContentCounts();
       view.innerHTML = `
         <div class="card">
-          ${isAdmin() ? "" : `<p class="muted" style="margin-top:0">Courses are managed by your administrator.</p>`}
+          <p class="muted" style="margin-top:0">${isAdmin() ? "Click a course to add its materials (links, PDFs, videos, PowerPoints) and its quiz." : "Courses are managed by your administrator. Click a course to see its materials and quiz results."}</p>
           <div class="table-wrap"><table>
-            <thead><tr><th>Title</th><th>Category</th><th>Hours</th><th>Valid for</th><th>Mandatory</th><th>Status</th><th></th></tr></thead>
+            <thead><tr><th>Title</th><th>Online course</th><th>Category</th><th>Hours</th><th>Valid for</th><th>Mandatory</th><th>Status</th><th></th></tr></thead>
             <tbody>${state.courses.map((c) => `<tr>
-              <td>${esc(c.title)}</td><td>${esc(c.category || "—")}</td>
+              <td><a href="#course/${c.id}"><strong>${esc(c.title)}</strong></a></td>
+              <td>${contentLabel(content.get(c.id))}</td><td>${esc(c.category || "—")}</td>
               <td>${c.duration_hours ?? "—"}</td><td>${c.validity_months ? c.validity_months + " months" : "No expiry"}</td>
               <td>${c.mandatory ? badge("admin", "Mandatory") : badge("neutral", "Optional")}</td>
               <td>${badge(c.active ? "active" : "inactive")}</td>
-              <td class="actions">${isAdmin() ? `<button class="link small" data-edit="${c.id}">Edit</button> ${delBtn(c.id)}` : ""}</td></tr>`).join("")
-              || `<tr><td colspan="7" class="empty">No courses yet.</td></tr>`}
+              <td class="actions"><a class="small" href="#course/${c.id}" style="margin-right:.5rem">Open</a>${isAdmin() ? `<button class="link small" data-edit="${c.id}">Edit</button> ${delBtn(c.id)}` : ""}</td></tr>`).join("")
+              || `<tr><td colspan="8" class="empty">No courses yet.</td></tr>`}
             </tbody></table></div>
         </div>`;
       $$("[data-edit]", view).forEach((b) => b.onclick = () => editCourse(state.courses.find((c) => c.id === Number(b.dataset.edit))));
@@ -1449,7 +1451,10 @@
             ? `This also deletes ${nRec} training record(s) and ${nSess} session(s) for this course. To keep that history, Edit the course and untick Active instead.`
             : "No training records or sessions use it.";
           if (!(await confirmBox(`Delete the course "${c.title}"? ${warn}`))) return;
-          check(await sb.from("courses").delete().eq("id", c.id)); toast("Course deleted"); route();
+          const files = ((await sb.from("course_materials").select("file_path").eq("course_id", c.id)).data || []).map((m) => m.file_path).filter(Boolean);
+          check(await sb.from("courses").delete().eq("id", c.id));
+          if (files.length) await sb.storage.from(MAT_BUCKET).remove(files);
+          toast("Course deleted"); route();
         } catch (ex) { toast(ex.message, true); }
       });
       this.onAction = (act) => { if (act === "add") editCourse(null); };
@@ -1466,6 +1471,7 @@
           <div class="field"><label>Category</label><input name="category" value="${esc(c.category)}" placeholder="Safety, Onboarding…"></div>
           <div class="field"><label>Duration (hours)</label><input type="number" step="0.25" min="0" name="duration_hours" value="${esc(c.duration_hours)}"></div>
           <div class="field"><label>Valid for (months) <span class="muted">blank = never expires</span></label><input type="number" min="1" name="validity_months" value="${esc(c.validity_months)}"></div>
+          <div class="field"><label>Quiz pass mark (%)</label><input type="number" min="1" max="100" name="pass_mark" value="${esc(c.pass_mark ?? 80)}"></div>
         </div>
         <div class="field"><label>Description</label><textarea name="description" rows="2">${esc(c.description)}</textarea></div>
         <div class="field"><label style="display:flex;gap:.5rem;align-items:center"><input type="checkbox" name="mandatory" ${c.mandatory ? "checked" : ""}> Mandatory for all active employees</label></div>
@@ -1473,11 +1479,491 @@
       async onSubmit(d) {
         const row = { title: d.title.trim(), category: nn(d.category), duration_hours: nn(d.duration_hours),
           validity_months: nn(d.validity_months), description: nn(d.description), mandatory: !!d.mandatory, active: !!d.active };
+        if (d.pass_mark) row.pass_mark = Math.min(100, Math.max(1, Number(d.pass_mark)));
         if (isNew) check(await sb.from("courses").insert(row));
         else check(await sb.from("courses").update(row).eq("id", c.id));
         toast(isNew ? "Course added" : "Course saved"); route();
       }
     });
+  }
+
+  // =============================================================== ONLINE COURSES
+  // Materials live in the private "course-materials" bucket as  <course id>/<time>-<file>
+  const MAT_BUCKET = "course-materials";
+  const MAT_MAX = 50 * 1024 * 1024;
+  const MAT_KIND = { link: "Link", pdf: "PDF", video: "Video", ppt: "PowerPoint", file: "File" };
+  const MAT_ACCEPT = { pdf: "application/pdf,.pdf", video: "video/mp4,video/webm,video/quicktime,.mp4,.webm,.mov",
+    ppt: ".ppt,.pptx,application/vnd.ms-powerpoint,application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    file: ".pdf,.doc,.docx,.ppt,.pptx,.jpg,.jpeg,.png" };
+  const MIME_BY_EXT = { pdf: "application/pdf", mp4: "video/mp4", webm: "video/webm", mov: "video/quicktime",
+    ppt: "application/vnd.ms-powerpoint", pptx: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    doc: "application/msword", docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document", jpg: "image/jpeg", jpeg: "image/jpeg", png: "image/png" };
+  const kindBadge = (k) => `<span class="kind kind-${esc(k)}">${esc(MAT_KIND[k] || k)}</span>`;
+
+  async function courseContentCounts() {
+    const [{ data: mats }, { data: qs }] = await Promise.all([
+      sb.from("course_materials").select("id, course_id"), sb.rpc("quiz_counts")]);
+    const out = new Map();
+    const get = (id) => out.get(id) || out.set(id, { materials: 0, questions: 0 }).get(id);
+    (mats || []).forEach((m) => get(m.course_id).materials++);
+    (qs || []).forEach((q) => { get(q.course_id).questions = q.questions; });
+    return out;
+  }
+  const contentLabel = (c) => !c || (!c.materials && !c.questions) ? `<span class="muted">—</span>`
+    : [c.materials ? `${c.materials} item${c.materials > 1 ? "s" : ""}` : "", c.questions ? `${c.questions}-question quiz` : ""].filter(Boolean).join(" · ");
+
+  async function loadMaterials(courseId) {
+    return check(await sb.from("course_materials").select("*").eq("course_id", courseId).order("sort").order("id"));
+  }
+  async function materialUrl(m) {
+    if (!m.file_path) return m.url;
+    const { data, error } = await sb.storage.from(MAT_BUCKET).createSignedUrl(m.file_path, 3600);
+    if (error || !data) throw new Error(error ? error.message : "Could not open the file.");
+    return data.signedUrl;
+  }
+  function videoEmbed(url) {
+    let m = String(url || "").match(/(?:youtube\.com\/(?:watch\?(?:.*&)?v=|embed\/|shorts\/|live\/)|youtu\.be\/)([\w-]{11})/);
+    if (m) return `https://www.youtube-nocookie.com/embed/${m[1]}?rel=0`;
+    m = String(url || "").match(/vimeo\.com\/(?:video\/)?(\d+)/);
+    if (m) return `https://player.vimeo.com/video/${m[1]}`;
+    return null;
+  }
+  const safeUrl = (u) => /^https?:\/\//i.test(String(u || "").trim());
+
+  // ---- Course page (managers and admins)
+  views.course = {
+    title: "Course", navAs: "courses",
+    actions() {
+      return `<a class="btn secondary" href="#courses">← All courses</a>
+              <button class="secondary" data-act="preview">Preview as staff</button>
+              ${isAdmin() ? `<button data-act="edit">Edit course</button>` : ""}`;
+    },
+    async render(view) {
+      const id = Number(this.arg);
+      await loadLookups();
+      const c = state.courses.find((x) => x.id === id);
+      if (!c) { view.innerHTML = `<div class="card empty">That course doesn't exist any more. <a href="#courses">Back to courses</a></div>`; this.onAction = () => goTo("#courses"); return; }
+      $("#pageTitle").textContent = c.title; document.title = `${c.title} · Train Well`;
+      const [mats, qsRes, attRes] = await Promise.all([
+        loadMaterials(id),
+        sb.from("quiz_questions").select("*").eq("course_id", id).order("sort").order("id"),
+        sb.from("quiz_attempts").select("*, employees(first_name, last_name, facility_id)").eq("course_id", id).order("created_at", { ascending: false })]);
+      if (qsRes.error && /quiz_questions|relation|schema cache/i.test(qsRes.error.message)) {
+        view.innerHTML = `<div class="card"><h2>Online courses aren't set up yet</h2><p>An administrator needs to run <code>supabase/update-2026-10-online-courses.sql</code> once in the Supabase SQL Editor.</p></div>`;
+        return;
+      }
+      const qs = qsRes.data || [], atts = attRes.data || [];
+      const people = new Set(atts.map((a) => a.employee_id)), passedPeople = new Set(atts.filter((a) => a.passed).map((a) => a.employee_id));
+      const admin = isAdmin();
+      view.innerHTML = `
+        <div class="card">
+          <p style="margin:0 0 .6rem">${esc(c.description || "No description yet.")}</p>
+          <div class="course-facts">
+            ${c.mandatory ? badge("admin", "Mandatory") : badge("neutral", "Optional")}
+            <span>${c.validity_months ? `Valid for ${c.validity_months} months` : "Never expires"}</span>
+            <span>Pass mark ${c.pass_mark ?? 80}%</span>
+            ${c.duration_hours ? `<span>${c.duration_hours} h</span>` : ""}
+            ${c.active ? "" : badge("inactive", "Inactive (hidden from staff)")}
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-head"><h2>Course content</h2>${admin ? `<button class="small" data-addmat>+ Add material</button>` : ""}</div>
+          <p class="muted" style="margin-top:0">Staff go through these in order. The quiz opens once they have opened every item.</p>
+          <ol class="mat-list">${mats.map((m, i) => `
+            <li>
+              <span class="mat-num">${i + 1}</span>
+              <span class="mat-main">${kindBadge(m.kind)} <strong>${esc(m.title)}</strong>
+                <span class="muted mat-src">${m.file_path ? "Uploaded file" : esc(m.url)}</span></span>
+              <span class="mat-actions">
+                <button class="link small" data-openmat="${m.id}">Open</button>
+                ${admin ? `<button class="link small" data-up="${m.id}" ${i === 0 ? "disabled" : ""} aria-label="Move up">↑</button>
+                <button class="link small" data-down="${m.id}" ${i === mats.length - 1 ? "disabled" : ""} aria-label="Move down">↓</button>
+                <button class="link small" data-editmat="${m.id}">Edit</button>
+                <button class="link small" data-delmat="${m.id}" style="color:var(--bad)">Delete</button>` : ""}
+              </span>
+            </li>`).join("") || `<li class="empty-li">No materials yet.${admin ? " Add a link, PDF, video or PowerPoint." : ""}</li>`}
+          </ol>
+        </div>
+
+        <div class="card">
+          <div class="card-head"><h2>Quiz</h2>${admin ? `<button class="small" data-addq>+ Add question</button>` : ""}</div>
+          <p class="muted" style="margin-top:0">${qs.length ? `${qs.length} question${qs.length > 1 ? "s" : ""}. Staff need ${c.pass_mark ?? 80}% to pass. A pass records this training on their record straight away.` : "No quiz yet. Without a quiz, staff can view the materials but the course isn't recorded as completed."}</p>
+          <ol class="q-list">${qs.map((q, i) => `
+            <li>
+              <div class="q-head"><strong>${i + 1}. ${esc(q.question)}</strong>
+                ${admin ? `<span class="mat-actions"><button class="link small" data-qup="${q.id}" ${i === 0 ? "disabled" : ""} aria-label="Move up">↑</button>
+                  <button class="link small" data-qdown="${q.id}" ${i === qs.length - 1 ? "disabled" : ""} aria-label="Move down">↓</button>
+                  <button class="link small" data-editq="${q.id}">Edit</button>
+                  <button class="link small" data-delq="${q.id}" style="color:var(--bad)">Delete</button></span>` : ""}</div>
+              <ul class="q-opts">${q.options.map((o, j) => `<li class="${j === q.correct ? "is-right" : ""}">${esc(o)}${j === q.correct ? ' <span class="muted">(correct)</span>' : ""}</li>`).join("")}</ul>
+            </li>`).join("")}
+          </ol>
+        </div>
+
+        <div class="card">
+          <div class="card-head"><h2>Results</h2>${atts.length ? `<button class="secondary small" data-xls>Download Excel</button>` : ""}</div>
+          <p class="muted" style="margin-top:0">${atts.length ? `${passedPeople.size} of ${people.size} staff who took the quiz have passed · ${atts.length} attempt${atts.length > 1 ? "s" : ""} in total` : "No one has taken this quiz yet."}</p>
+          ${atts.length ? `<div class="table-wrap"><table>
+            <thead><tr><th>Date</th><th>Employee</th><th>Home</th><th>Score</th><th>Result</th></tr></thead>
+            <tbody>${atts.map((a) => `<tr><td>${fmtDateTime(a.created_at)}</td>
+              <td><button class="link" data-emp="${a.employee_id}">${esc(fullName(a.employees))}</button></td>
+              <td>${esc(facilityName(a.employees?.facility_id))}</td>
+              <td><strong>${Number(a.score)}%</strong> <span class="muted">(${a.correct}/${a.total})</span></td>
+              <td>${a.passed ? badge("valid", "Passed") : badge("expired", "Not passed")}</td></tr>`).join("")}
+            </tbody></table></div>` : ""}
+        </div>`;
+
+      const reload = () => route();
+      $$("[data-openmat]", view).forEach((b) => b.onclick = async () => {
+        const m = mats.find((x) => x.id === Number(b.dataset.openmat));
+        const w = window.open("", "_blank");
+        try { const u = await materialUrl(m); if (w) w.location.href = u; else location.href = u; }
+        catch (ex) { if (w) w.close(); toast(ex.message, true); }
+      });
+      $$("[data-emp]", view).forEach((b) => b.onclick = () => showEmployee(Number(b.dataset.emp)));
+      $("[data-xls]", view)?.addEventListener("click", () => downloadXLSX(`TrainWell-${c.title.replace(/[^\w]+/g, "-")}-quiz-results-${todayISO()}.xlsx`, "Quiz results", [
+        ["Date", "Employee", "Home", "Score %", "Correct", "Questions", "Result"],
+        ...atts.map((a) => [toDate(a.created_at.slice(0, 10)), fullName(a.employees), facilityName(a.employees?.facility_id), Number(a.score), a.correct, a.total, a.passed ? "Passed" : "Not passed"])
+      ]).catch((ex) => toast(ex.message, true)));
+      if (admin) {
+        $("[data-addmat]", view).onclick = () => editMaterial(c, null, mats);
+        $$("[data-editmat]", view).forEach((b) => b.onclick = () => editMaterial(c, mats.find((x) => x.id === Number(b.dataset.editmat)), mats));
+        $$("[data-delmat]", view).forEach((b) => b.onclick = async () => {
+          const m = mats.find((x) => x.id === Number(b.dataset.delmat));
+          if (!(await confirmBox(`Delete "${m.title}" from this course?`))) return;
+          try { check(await sb.from("course_materials").delete().eq("id", m.id)); if (m.file_path) await sb.storage.from(MAT_BUCKET).remove([m.file_path]); toast("Material deleted"); reload(); }
+          catch (ex) { toast(ex.message, true); }
+        });
+        const move = async (list, table, idv, dir) => {
+          const i = list.findIndex((x) => x.id === idv), j = i + dir;
+          if (i < 0 || j < 0 || j >= list.length) return;
+          const order = list.map((x) => x.id); [order[i], order[j]] = [order[j], order[i]];
+          try { for (let k = 0; k < order.length; k++) check(await sb.from(table).update({ sort: k + 1 }).eq("id", order[k])); reload(); }
+          catch (ex) { toast(ex.message, true); }
+        };
+        $$("[data-up]", view).forEach((b) => b.onclick = () => move(mats, "course_materials", Number(b.dataset.up), -1));
+        $$("[data-down]", view).forEach((b) => b.onclick = () => move(mats, "course_materials", Number(b.dataset.down), 1));
+        $$("[data-qup]", view).forEach((b) => b.onclick = () => move(qs, "quiz_questions", Number(b.dataset.qup), -1));
+        $$("[data-qdown]", view).forEach((b) => b.onclick = () => move(qs, "quiz_questions", Number(b.dataset.qdown), 1));
+        $("[data-addq]", view).onclick = () => editQuestion(c, null, qs);
+        $$("[data-editq]", view).forEach((b) => b.onclick = () => editQuestion(c, qs.find((x) => x.id === Number(b.dataset.editq)), qs));
+        $$("[data-delq]", view).forEach((b) => b.onclick = async () => {
+          if (!(await confirmBox("Delete this question?"))) return;
+          try { check(await sb.from("quiz_questions").delete().eq("id", Number(b.dataset.delq))); toast("Question deleted"); reload(); }
+          catch (ex) { toast(ex.message, true); }
+        });
+      }
+      this.onAction = (act) => {
+        if (act === "preview") goTo(`#learn/${id}`);
+        if (act === "edit") editCourse(c);
+      };
+    }
+  };
+
+  function editMaterial(course, m, mats) {
+    const isNew = !m;
+    m = m || { kind: "pdf" };
+    const { form } = openModal({
+      title: isNew ? `Add material · ${course.title}` : "Edit material", submitText: isNew ? "Add material" : "Save",
+      body: `
+        <div class="grid2">
+          <div class="field"><label>Type *</label>
+            <select name="kind" ${isNew ? "" : "disabled"}>${Object.entries(MAT_KIND).map(([k, v]) => `<option value="${k}" ${m.kind === k ? "selected" : ""}>${v}</option>`).join("")}</select></div>
+          <div class="field"><label>Title *</label><input name="title" required value="${esc(m.title)}" placeholder="e.g. WHMIS training slides"></div>
+        </div>
+        ${isNew ? `<div class="field" data-srcrow><label>Source</label>
+          <div class="choices"><label class="choice"><input type="radio" name="src" value="file" checked> Upload a file</label>
+          <label class="choice"><input type="radio" name="src" value="url"> Web link</label></div></div>` : ""}
+        <div class="field" data-filerow><label>File * <span class="muted">up to 50 MB</span></label><input type="file" name="file"></div>
+        <div class="field" data-urlrow><label>Web address *</label><input name="url" type="url" placeholder="https://" value="${esc(m.url)}"></div>
+        <p class="muted" data-hint style="font-size:.85rem;margin:0"></p>`,
+      async onSubmit(d, frm) {
+        const kind = isNew ? d.kind : m.kind;
+        const useUrl = isNew ? (kind === "link" || d.src === "url") : !m.file_path;
+        const row = { title: d.title.trim() };
+        if (useUrl) {
+          const u = String(d.url || "").trim();
+          if (!safeUrl(u)) throw new Error("Enter a full web address starting with https://");
+          row.url = u;
+        }
+        if (!isNew) { check(await sb.from("course_materials").update(row).eq("id", m.id)); toast("Material saved"); route(); return; }
+        Object.assign(row, { course_id: course.id, kind, sort: (mats.reduce((mx, x) => Math.max(mx, x.sort || 0), 0) || mats.length) + 1 });
+        if (!useUrl) {
+          const file = $("input[name=file]", frm).files[0];
+          if (!file) throw new Error("Choose the file to upload.");
+          if (file.size > MAT_MAX) throw new Error(kind === "video"
+            ? "That video is over 50 MB. Upload it to YouTube (as Unlisted) or Vimeo and add it as a web link instead."
+            : "That file is over 50 MB. Try saving a smaller version, or add it as a web link.");
+          const ext = (file.name.split(".").pop() || "").toLowerCase();
+          const path = `${course.id}/${Date.now()}-${file.name.replace(/[^A-Za-z0-9._-]+/g, "_").slice(-80)}`;
+          const { error } = await sb.storage.from(MAT_BUCKET).upload(path, file, { contentType: file.type || MIME_BY_EXT[ext] || undefined, upsert: false });
+          if (error) throw new Error(/mime|type/i.test(error.message) ? "That type of file can't be uploaded. Use PDF, MP4 video, PowerPoint, Word or an image."
+            : /bucket/i.test(error.message) ? "Course uploads aren't set up yet. Run the online-courses update in Supabase (see README)." : error.message);
+          row.file_path = path;
+        }
+        const { error } = await sb.from("course_materials").insert(row);
+        if (error) { if (row.file_path) await sb.storage.from(MAT_BUCKET).remove([row.file_path]); throw new Error(error.message); }
+        toast("Material added"); route();
+      }
+    });
+    const sync = () => {
+      const kind = isNew ? form.kind.value : m.kind;
+      const src = isNew ? (kind === "link" ? "url" : (form.querySelector("input[name=src]:checked") || {}).value) : (m.file_path ? "file" : "url");
+      if (isNew) $("[data-srcrow]", form).classList.toggle("hidden", kind === "link");
+      $("[data-filerow]", form).classList.toggle("hidden", src !== "file" || !isNew);
+      $("[data-urlrow]", form).classList.toggle("hidden", src !== "url");
+      if (isNew) $("input[name=file]", form).accept = MAT_ACCEPT[kind] || "";
+      $("[data-hint]", form).textContent = {
+        video: "Videos up to 50 MB can be uploaded (MP4 works best). For longer videos, put them on YouTube as Unlisted, or on Vimeo, and paste the link: they play right inside the course.",
+        ppt: "Staff see the slides in the browser through Microsoft's free online viewer. Saving the slides as a PDF also works well and opens faster on phones.",
+        pdf: "PDFs open right inside the course.", link: "Opens in a new tab, for example a website, a Google Slides deck or a SharePoint page.",
+        file: "For Word documents and images. Staff download or open them."
+      }[kind] || "";
+    };
+    $$("select[name=kind], input[name=src]", form).forEach((el) => el.addEventListener("change", sync));
+    if (!isNew) $("[data-filerow]", form).classList.add("hidden");
+    sync();
+  }
+
+  function editQuestion(course, q, qs) {
+    const isNew = !q;
+    q = q || { question: "", options: ["", "", ""], correct: -1 };
+    const optRow = (val, i, checked) => `<div class="opt-row">
+      <input type="radio" name="correct" value="${i}" ${checked ? "checked" : ""} aria-label="Correct answer">
+      <input name="opt" value="${esc(val)}" placeholder="Answer ${i + 1}">
+      <button type="button" class="link small" data-rmopt aria-label="Remove answer">Remove</button></div>`;
+    const { form } = openModal({
+      title: isNew ? `Add question · ${course.title}` : "Edit question", submitText: isNew ? "Add question" : "Save",
+      body: `
+        <div class="field"><label>Question *</label><textarea name="question" rows="2" required>${esc(q.question)}</textarea></div>
+        <div class="field"><label>Answers <span class="muted">select the correct one</span></label>
+          <div data-opts>${q.options.map((o, i) => optRow(o, i, i === q.correct)).join("")}</div>
+          <button type="button" class="link small" data-addopt>+ Add answer</button></div>`,
+      async onSubmit(d, frm) {
+        const rows = $$(".opt-row", frm).map((r) => ({ text: $("input[name=opt]", r).value.trim(), right: $("input[name=correct]", r).checked }));
+        const kept = rows.filter((r) => r.text);
+        if (kept.length < 2) throw new Error("Give at least two answers.");
+        if (kept.length > 6) throw new Error("Use at most six answers.");
+        const correct = kept.findIndex((r) => r.right);
+        if (correct < 0) throw new Error("Select which answer is correct.");
+        const row = { question: d.question.trim(), options: kept.map((r) => r.text), correct };
+        if (isNew) check(await sb.from("quiz_questions").insert({ ...row, course_id: course.id, sort: (qs.reduce((mx, x) => Math.max(mx, x.sort || 0), 0) || qs.length) + 1 }));
+        else check(await sb.from("quiz_questions").update(row).eq("id", q.id));
+        toast(isNew ? "Question added" : "Question saved"); route();
+      }
+    });
+    const box = $("[data-opts]", form);
+    const renumber = () => $$(".opt-row", box).forEach((r, i) => { $("input[name=correct]", r).value = i; $("input[name=opt]", r).placeholder = `Answer ${i + 1}`; });
+    const wire = () => $$("[data-rmopt]", box).forEach((b) => b.onclick = () => {
+      if ($$(".opt-row", box).length <= 2) { toast("A question needs at least two answers.", true); return; }
+      b.closest(".opt-row").remove(); renumber();
+    });
+    $("[data-addopt]", form).onclick = () => {
+      const n = $$(".opt-row", box).length;
+      if (n >= 6) { toast("Six answers is the most a question can have.", true); return; }
+      box.insertAdjacentHTML("beforeend", optRow("", n, false)); wire(); $$("input[name=opt]", box).at(-1).focus();
+    };
+    wire();
+  }
+
+  // ---- Training area: list of online courses (staff with a login) and the course player
+  async function loadLearning() {
+    const emp = state.me.employee_id;
+    const [mats, qc, viewsRes, attRes] = await Promise.all([
+      sb.from("course_materials").select("id, course_id"), sb.rpc("quiz_counts"),
+      emp ? sb.from("material_views").select("material_id").eq("employee_id", emp) : Promise.resolve({ data: [] }),
+      emp ? sb.from("quiz_attempts").select("course_id, score, passed, created_at").eq("employee_id", emp).order("created_at", { ascending: false }) : Promise.resolve({ data: [] })]);
+    if (mats.error) throw new Error(/course_materials|relation|schema cache/i.test(mats.error.message) ? "Online courses aren't set up yet. Ask your administrator." : mats.error.message);
+    const seen = new Set((viewsRes.data || []).map((v) => v.material_id));
+    const by = new Map();
+    const get = (id) => by.get(id) || by.set(id, { materials: [], questions: 0, attempts: [] }).get(id);
+    (mats.data || []).forEach((m) => get(m.course_id).materials.push(m.id));
+    (qc.data || []).forEach((q) => { get(q.course_id).questions = q.questions; });
+    (attRes.data || []).forEach((a) => by.has(a.course_id) && get(a.course_id).attempts.push(a));
+    return { by, seen };
+  }
+
+  views.learn = {
+    title: "My courses", everyone: true, navAs() { return isEmployee() ? "learn" : "courses"; },
+    actions() { return isEmployee() || !this.arg ? "" : `<a class="btn secondary" href="#course/${esc(this.arg)}">← Back to course</a>`; },
+    async render(view) {
+      if (this.arg) return renderPlayer(view, Number(this.arg));
+      if (!isEmployee()) { goTo("#courses"); return; }
+      const { by, seen } = await loadLearning();
+      const { rows } = await loadMyTraining();
+      const trainingStatus = new Map(rows.map((r) => [r.course.id, r.status]));
+      const list = state.courses.filter((c) => c.active && by.has(c.id) && (by.get(c.id).materials.length || by.get(c.id).questions))
+        .map((c) => {
+          const x = by.get(c.id), viewed = x.materials.filter((m) => seen.has(m)).length;
+          const lastPass = x.attempts.find((a) => a.passed), ts = trainingStatus.get(c.id);
+          let state_, label;
+          if (lastPass && ts !== "expired" && ts !== "expiring") { state_ = "done"; label = `Passed ${Number(lastPass.score)}% on ${fmtDate(lastPass.created_at)}`; }
+          else if (lastPass) { state_ = "due"; label = ts === "expired" ? "Expired: please take it again" : "Due again soon"; }
+          else if (viewed || x.attempts.length) { state_ = "going"; label = x.attempts.length ? `Last score ${Number(x.attempts[0].score)}%. Not passed yet` : `${viewed} of ${x.materials.length} items done`; }
+          else { state_ = "new"; label = "Not started"; }
+          return { c, x, viewed, state_, label };
+        })
+        .sort((a, b) => ({ due: 0, going: 1, new: 2, done: 3 }[a.state_] - { due: 0, going: 1, new: 2, done: 3 }[b.state_]) || (b.c.mandatory - a.c.mandatory) || a.c.title.localeCompare(b.c.title));
+      view.innerHTML = list.length ? `<div class="course-grid">${list.map(({ c, x, viewed, state_, label }) => {
+          const total = x.materials.length + (x.questions ? 1 : 0), done = viewed + (state_ === "done" ? (x.questions ? 1 : 0) : 0);
+          return `<a class="course-card" href="#learn/${c.id}">
+            <div class="cc-top">${c.mandatory ? badge("admin", "Required") : badge("neutral", "Optional")}<span class="cc-state ${state_}">${esc(label)}</span></div>
+            <h3>${esc(c.title)}</h3>
+            <p class="muted">${esc(c.description || "")}</p>
+            <div class="cc-meta">${x.materials.length ? `${x.materials.length} item${x.materials.length > 1 ? "s" : ""}` : ""}${x.materials.length && x.questions ? " · " : ""}${x.questions ? `${x.questions}-question quiz` : ""}</div>
+            <div class="bar"><span style="width:${total ? Math.round(done / total * 100) : 0}%"></span></div>
+            <span class="cc-go">${state_ === "new" ? "Start course" : state_ === "done" ? "Review" : "Continue"}</span>
+          </a>`; }).join("")}</div>`
+        : `<div class="card empty">There are no online courses yet. Your manager can still record training for you, and you can upload certificates on <a href="#my">My training</a>.</div>`;
+    }
+  };
+
+  async function renderPlayer(view, courseId) {
+    const c = state.courses.find((x) => x.id === courseId);
+    if (!c) { view.innerHTML = `<div class="card empty">That course isn't available.</div>`; return; }
+    $("#pageTitle").textContent = c.title; document.title = `${c.title} · Train Well`;
+    const preview = !isEmployee();
+    const mats = await loadMaterials(courseId);
+    const { by, seen } = await loadLearning();
+    const info = by.get(courseId) || { questions: 0, attempts: [] };
+    const allSeen = () => preview || mats.every((m) => seen.has(m.id));
+    let current = mats.findIndex((m) => !seen.has(m.id));
+    if (current < 0) current = mats.length ? (info.questions && !preview ? "quiz" : 0) : "quiz";
+    if (preview && mats.length) current = 0;
+
+    view.innerHTML = `
+      ${preview ? `<div class="alert info">Preview: this is what staff see. Your answers are marked but nothing is saved.</div>` : ""}
+      <div class="player">
+        <aside class="card player-steps">
+          <h2>Course content</h2>
+          <ol data-steps></ol>
+        </aside>
+        <section class="card player-main" data-main></section>
+      </div>`;
+
+    const drawSteps = () => {
+      $("[data-steps]", view).innerHTML = mats.map((m, i) => `
+        <li><button type="button" class="step ${current === i ? "is-current" : ""} ${seen.has(m.id) ? "is-done" : ""}" data-step="${i}">
+          <span class="step-mark" aria-hidden="true">${seen.has(m.id) ? "✓" : i + 1}</span>
+          <span><span class="step-title">${esc(m.title)}</span><span class="step-kind">${esc(MAT_KIND[m.kind])}</span></span></button></li>`).join("")
+        + (info.questions ? `<li><button type="button" class="step ${current === "quiz" ? "is-current" : ""} ${info.attempts.some((a) => a.passed) ? "is-done" : ""}" data-step="quiz" ${allSeen() ? "" : "disabled"}>
+          <span class="step-mark" aria-hidden="true">${info.attempts.some((a) => a.passed) ? "✓" : "?"}</span>
+          <span><span class="step-title">Quiz</span><span class="step-kind">${allSeen() ? `${info.questions} questions · pass mark ${c.pass_mark ?? 80}%` : "Opens after all items"}</span></span></button></li>` : "");
+      $$("[data-step]", view).forEach((b) => b.onclick = () => { current = b.dataset.step === "quiz" ? "quiz" : Number(b.dataset.step); show(); });
+    };
+
+    const markSeen = async (m) => {
+      if (preview || seen.has(m.id)) return;
+      const { error } = await sb.from("material_views").upsert({ employee_id: state.me.employee_id, material_id: m.id }, { onConflict: "employee_id,material_id", ignoreDuplicates: true });
+      if (!error) { seen.add(m.id); drawSteps(); }
+    };
+
+    const nextButton = (i) => {
+      const nextIsQuiz = i === mats.length - 1 && info.questions;
+      if (i < mats.length - 1) return `<button type="button" data-next>Next: ${esc(mats[i + 1].title)} →</button>`;
+      if (nextIsQuiz) return `<button type="button" data-next>Go to the quiz →</button>`;
+      return `<a class="btn secondary" href="${isEmployee() ? "#learn" : `#course/${courseId}`}">Finish</a>`;
+    };
+
+    async function show() {
+      drawSteps();
+      const main = $("[data-main]", view);
+      if (current === "quiz") return showQuiz(main);
+      const m = mats[current];
+      if (!m) { main.innerHTML = `<p class="muted">This course has no materials yet.</p>`; return; }
+      main.innerHTML = `<div class="viewer-head"><div>${kindBadge(m.kind)}<h2>${esc(m.title)}</h2></div></div><div class="viewer" data-viewer><p class="muted">Loading…</p></div>
+        <div class="viewer-foot"><span class="muted" data-hint></span>${nextButton(current)}</div>`;
+      let url;
+      try { url = await materialUrl(m); } catch (ex) { $("[data-viewer]", main).innerHTML = `<div class="alert error">${esc(ex.message)}</div>`; return; }
+      const v = $("[data-viewer]", main), hint = $("[data-hint]", main);
+      const openBtn = (label) => `<a class="btn" href="${esc(url)}" target="_blank" rel="noopener" data-ext>${label}</a>`;
+      const ext = (m.file_path || m.url || "").split("?")[0].split(".").pop().toLowerCase();
+      if (m.kind === "video") {
+        const emb = !m.file_path && videoEmbed(url);
+        v.innerHTML = emb ? `<div class="frame16x9"><iframe src="${esc(emb)}" title="${esc(m.title)}" allow="accelerometer; encrypted-media; gyroscope; picture-in-picture; fullscreen" allowfullscreen></iframe></div>`
+          : m.file_path ? `<video controls playsinline preload="metadata" src="${esc(url)}"></video>` : `<p>This video is on another website.</p>${openBtn("Watch the video")}`;
+        markSeen(m);
+      } else if (m.kind === "pdf" || (m.kind === "file" && ext === "pdf")) {
+        v.innerHTML = `<iframe class="doc-frame" src="${esc(url)}" title="${esc(m.title)}"></iframe><p class="viewer-alt">Can't see it? ${openBtn("Open the PDF")}</p>`;
+        markSeen(m);
+      } else if (m.kind === "ppt" && m.file_path) {
+        v.innerHTML = `<iframe class="doc-frame" src="https://view.officeapps.live.com/op/embed.aspx?src=${encodeURIComponent(url)}" title="${esc(m.title)}" allowfullscreen></iframe>
+          <p class="viewer-alt">Slides not showing? ${openBtn("Download the slides")}</p>`;
+        hint.textContent = "Use the arrows under the slides to move through them.";
+        markSeen(m);
+      } else if (m.kind === "file" && /^(jpe?g|png)$/.test(ext)) {
+        v.innerHTML = `<img class="doc-img" src="${esc(url)}" alt="${esc(m.title)}">`; markSeen(m);
+      } else {
+        v.innerHTML = `<div class="open-panel"><p>${m.kind === "link" ? "This opens in a new tab. Come back here when you're done." : "Open the file to read it, then come back here."}</p>${openBtn(m.kind === "link" ? "Open the link" : "Open the file")}</div>`;
+        $("[data-ext]", v).addEventListener("click", () => markSeen(m));
+        if (preview) markSeen(m);
+      }
+      $("[data-next]", main)?.addEventListener("click", () => { current = current < mats.length - 1 ? current + 1 : "quiz"; show(); main.scrollIntoView({ behavior: "smooth", block: "start" }); });
+    }
+
+    async function showQuiz(main) {
+      if (!allSeen()) { main.innerHTML = `<h2>Quiz</h2><p>Open every item in the course first, then the quiz will unlock.</p>`; return; }
+      main.innerHTML = `<p class="muted">Loading quiz…</p>`;
+      const { data, error } = await sb.rpc("get_quiz", { p_course: courseId });
+      if (error) { main.innerHTML = `<div class="alert error">${esc(error.message)}</div>`; return; }
+      const qs = data.questions || [];
+      if (!qs.length) { main.innerHTML = `<h2>Quiz</h2><p class="muted">This course doesn't have a quiz yet.</p>`; return; }
+      const last = info.attempts[0];
+      main.innerHTML = `
+        <form class="quiz" novalidate>
+          <div class="viewer-head"><div><h2>Quiz</h2><p class="muted" style="margin:.2rem 0 0">${qs.length} questions · you need ${data.pass_mark}% to pass${last ? ` · your last score was ${Number(last.score)}%` : ""}</p></div></div>
+          ${qs.map((q, i) => `<fieldset class="quiz-q" data-q="${q.id}"><legend><span class="qn">${i + 1}</span>${esc(q.question)}</legend>
+            ${q.options.map((o, j) => `<label class="quiz-opt"><input type="radio" name="q${q.id}" value="${j}"> <span>${esc(o)}</span></label>`).join("")}</fieldset>`).join("")}
+          <div class="alert error hidden" data-qerr></div>
+          <div class="viewer-foot"><span class="muted" data-left></span><button type="submit" data-submit>Submit answers</button></div>
+        </form>`;
+      const form = $("form", main);
+      const left = () => { const n = qs.filter((q) => form.querySelector(`input[name=q${q.id}]:checked`)).length; $("[data-left]", main).textContent = `${n} of ${qs.length} answered`; };
+      form.addEventListener("change", left); left();
+      form.addEventListener("submit", async (e) => {
+        e.preventDefault();
+        const answers = {}; let missing = 0;
+        qs.forEach((q) => { const r = form.querySelector(`input[name=q${q.id}]:checked`); if (r) answers[q.id] = Number(r.value); else missing++; });
+        const err = $("[data-qerr]", main);
+        if (missing) { err.textContent = `Answer all the questions first (${missing} left).`; err.classList.remove("hidden"); return; }
+        const btn = $("[data-submit]", main); btn.disabled = true; err.classList.add("hidden");
+        const { data: res, error } = await sb.rpc("submit_quiz", { p_course: courseId, p_answers: answers });
+        btn.disabled = false;
+        if (error) { err.textContent = error.message; err.classList.remove("hidden"); return; }
+        if (!preview) info.attempts.unshift({ course_id: courseId, score: res.score, passed: res.passed, created_at: new Date().toISOString() });
+        showResult(main, qs, answers, res);
+        drawSteps(); refreshBell();
+      });
+    }
+
+    function showResult(main, qs, answers, res) {
+      const byId = new Map((res.results || []).map((r) => [String(r.id), r]));
+      main.innerHTML = `
+        <div class="result ${res.passed ? "pass" : "fail"}">
+          <div class="result-score"><strong>${Number(res.score)}%</strong><span>${res.correct} of ${res.total} correct</span></div>
+          <div>
+            <h2>${res.passed ? "You passed" : "Not passed this time"}</h2>
+            <p>${res.passed
+              ? (res.preview ? "Preview only: nothing was saved." : `Well done. This course is now on your training record${res.expires_on ? ` and is valid until ${fmtDate(res.expires_on)}` : ""}.`)
+              : `You need ${res.pass_mark}% to pass. Have another look at the course materials, then try the quiz again.`}</p>
+            <div class="result-actions">
+              ${res.passed ? "" : `<button type="button" data-retry>Try the quiz again</button>`}
+              <a class="btn secondary" href="${isEmployee() ? "#learn" : `#course/${courseId}`}">${isEmployee() ? "Back to my courses" : "Back to the course"}</a>
+            </div>
+          </div>
+        </div>
+        <h3>Your answers</h3>
+        <ol class="review">${qs.map((q) => { const r = byId.get(String(q.id)) || {}; const mine = answers[q.id];
+          return `<li class="${r.is_correct ? "ok" : "no"}"><strong>${esc(q.question)}</strong>
+            <span>Your answer: ${esc(q.options[mine] ?? "—")} ${r.is_correct ? badge("valid", "Correct") : badge("expired", "Incorrect")}</span>
+            ${!r.is_correct && r.correct != null ? `<span class="muted">Correct answer: ${esc(q.options[r.correct])}</span>` : ""}</li>`; }).join("")}</ol>
+        ${res.passed ? "" : `<p class="muted" style="font-size:.85rem">The correct answers are shown once you pass.</p>`}`;
+      $("[data-retry]", main)?.addEventListener("click", () => showQuiz(main));
+      main.scrollIntoView({ behavior: "smooth", block: "start" });
+    }
+
+    show();
   }
 
   // -------------------------------------------------------- users (admin)
@@ -1829,6 +2315,8 @@
     actions() { return `<button data-act="upload">+ Upload certificate</button>`; },
     async render(view) {
       const { rows } = await loadMyTraining();
+      const online = await courseContentCounts().catch(() => new Map());
+      const hasCourse = (id) => { const x = online.get(id); return x && (x.materials || x.questions); };
       const n = (s) => rows.filter((r) => r.status === s).length;
       const todo = rows.filter((r) => r.status !== "valid");
       view.innerHTML = `
@@ -1846,7 +2334,7 @@
             <tbody>${todo.map((r) => `<tr><td style="white-space:normal"><strong>${esc(r.course.title)}</strong><br>
                 <span style="display:inline-flex;gap:.5rem;align-items:center;margin-top:.25rem">${myBadge(r.status)}
                 <span class="muted" style="font-size:.85rem">${r.rec?.expires_on ? "Expires " + fmtDate(r.rec.expires_on) : "Not done yet"}</span></span></td>
-              <td class="actions" style="vertical-align:middle"><button class="small" data-up="${r.course.id}">Upload</button></td></tr>`).join("")
+              <td class="actions" style="vertical-align:middle">${hasCourse(r.course.id) ? `<a class="btn small" href="#learn/${r.course.id}">Take course</a> ` : ""}<button class="small ${hasCourse(r.course.id) ? "secondary" : ""}" data-up="${r.course.id}">Upload</button></td></tr>`).join("")
               || `<tr><td colspan="2" class="empty">You're all up to date. 🎉</td></tr>`}
             </tbody></table></div>
         </div>
@@ -2087,14 +2575,15 @@
   let currentView = null;
   async function route() {
     const home = isEmployee() ? "my" : "dashboard";
-    let name = (location.hash || "#" + home).slice(1);
+    let [name, arg] = (location.hash || "#" + home).slice(1).split("/");
     let v = views[name];
-    if (!v || (v.adminOnly && !isAdmin()) || !!v.employee !== isEmployee()) {
-      name = home; v = views[home];
+    if (!v || (v.adminOnly && !isAdmin()) || (!v.everyone && !!v.employee !== isEmployee())) {
+      name = home; v = views[home]; arg = undefined;
       history.replaceState(null, "", "#" + name);
     }
-    currentView = v;
-    $$("#nav a").forEach((a) => a.classList.toggle("active", a.getAttribute("href") === "#" + name));
+    currentView = v; v.arg = arg;
+    const navName = (typeof v.navAs === "function" ? v.navAs() : v.navAs) || name;
+    $$("#nav a").forEach((a) => a.classList.toggle("active", a.getAttribute("href") === "#" + navName));
     $("#pageTitle").textContent = v.title;
     document.title = `${v.title} · Train Well`;
     $("#pageActions").innerHTML = v.actions ? v.actions() : "";
