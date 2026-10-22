@@ -351,19 +351,19 @@
 
       view.innerHTML = `
         <div class="stats">
-          <div class="stat"><div class="label">Active employees</div><div class="value">${employees.length}</div></div>
-          <div class="stat ${pct >= 90 ? "ok" : pct >= 75 ? "warn" : "bad"}"><div class="label">Mandatory training compliance</div><div class="value">${pct}%</div></div>
-          <div class="stat warn"><div class="label">Expiring in ${WARN_DAYS} days</div><div class="value">${count("expiring")}</div></div>
-          <div class="stat bad"><div class="label">Expired</div><div class="value">${count("expired")}</div></div>
-          <div class="stat bad"><div class="label">Never completed</div><div class="value">${count("missing")}</div></div>
+          <a class="stat stat-link" href="#employees" data-pre="employees:status:active"><div class="label">Active employees</div><div class="value">${employees.length}</div><span class="stat-go">View employees</span></a>
+          <a class="stat stat-link ${pct >= 90 ? "ok" : pct >= 75 ? "warn" : "bad"}" href="#compliance" data-pre="compliance:status:"><div class="label">Mandatory training compliance</div><div class="value">${pct}%</div><span class="stat-go">See charts</span></a>
+          <a class="stat stat-link warn" href="#compliance" data-pre="compliance:status:expiring"><div class="label">Expiring in ${WARN_DAYS} days</div><div class="value">${count("expiring")}</div><span class="stat-go">See who</span></a>
+          <a class="stat stat-link bad" href="#compliance" data-pre="compliance:status:expired"><div class="label">Expired</div><div class="value">${count("expired")}</div><span class="stat-go">See who</span></a>
+          <a class="stat stat-link bad" href="#compliance" data-pre="compliance:status:missing"><div class="label">Never completed</div><div class="value">${count("missing")}</div><span class="stat-go">See who</span></a>
         </div>
 
         <div class="card">
-          <h2>Compliance by facility</h2>
+          <div class="card-head"><h2>Compliance by facility</h2><a href="#compliance" data-pre="compliance:status:">Open compliance charts →</a></div>
           <div class="table-wrap"><table>
             <thead><tr><th>Facility</th><th>Employees</th><th style="width:40%">Compliance</th><th>Expired</th><th>Missing</th></tr></thead>
             <tbody>${byFac.map((r) => `
-              <tr><td>${esc(r.f.name)}</td><td>${r.n}</td>
+              <tr class="row-link" tabindex="0" data-go="#compliance" data-pre="compliance:facility:${r.f.id}" title="See compliance for ${esc(r.f.name)}"><td><strong>${esc(r.f.name)}</strong></td><td>${r.n}</td>
                 <td><div style="display:flex;gap:.6rem;align-items:center"><div class="bar" style="flex:1"><span style="width:${r.pct}%;background:${r.pct >= 90 ? "var(--ok)" : r.pct >= 75 ? "var(--accent)" : "var(--bad)"}"></span></div><strong>${r.pct}%</strong></div></td>
                 <td>${r.expired}</td><td>${r.missing}</td></tr>`).join("") || `<tr><td colspan="5" class="empty">No facilities yet.</td></tr>`}
             </tbody></table></div>
@@ -372,11 +372,11 @@
         ${drillErr ? "" : `
         <div class="card">
           <div style="display:flex;justify-content:space-between;align-items:center;gap:1rem;flex-wrap:wrap">
-            <h2 style="margin:0">Fire drills</h2><a href="#drills">Open Fire Drill →</a></div>
+            <h2 style="margin:0">Fire drills</h2><a href="#drills" data-pre="drills:facility:">Open Fire Drill →</a></div>
           <div class="table-wrap" style="margin-top:.6rem"><table>
             <thead><tr><th>Home</th><th>Last drill</th><th>Days since</th><th>Last outcome</th><th>Drills in ${thisYear}</th><th>Next drill</th></tr></thead>
             <tbody>${drillByFac.map((r) => `
-              <tr><td>${esc(r.f.name)}</td>
+              <tr class="row-link" tabindex="0" data-go="#drills" data-pre="drills:facility:${isAdmin() ? r.f.id : ""}" title="Open fire drills for ${esc(r.f.name)}"><td><strong>${esc(r.f.name)}</strong></td>
                 <td>${r.last ? fmtDate(r.last.drill_date) + (r.last.event_type === "alarm" ? " (alarm)" : "") : badge("missing", "None recorded")}</td>
                 <td>${r.days == null ? "—" : r.days}</td>
                 <td>${r.last ? (drillIssues(r.last) ? badge("expired", drillIssues(r.last) + (drillIssues(r.last) > 1 ? " issues" : " issue")) : badge("valid", "No issues")) : "—"}</td>
@@ -387,29 +387,30 @@
 
         <div class="cols">
           <div class="card">
-            <h2>Needs attention</h2>
+            <div class="card-head"><h2>Needs attention</h2><a href="#compliance" data-pre="compliance:status:">See all →</a></div>
             <div class="table-wrap"><table>
               <thead><tr><th>Employee</th><th>Course</th><th>Status</th><th>Expires</th></tr></thead>
               <tbody>${attention.map((i) => `
-                <tr><td><button class="link" data-emp="${i.employee.id}">${esc(fullName(i.employee))}</button></td>
+                <tr class="row-link" tabindex="0" data-open-emp="${i.employee.id}"><td><button class="link" data-emp="${i.employee.id}">${esc(fullName(i.employee))}</button></td>
                   <td>${esc(i.course.title)}</td><td>${badge(i.status)}</td><td>${fmtDate(i.expires_on)}</td></tr>`).join("")
                 || `<tr><td colspan="4" class="empty">Everyone is up to date. 🎉</td></tr>`}
               </tbody></table></div>
-            ${attention.length ? `<p style="margin:.8rem 0 0"><a href="#records">See all training records →</a></p>` : ""}
+            ${attention.length ? `<p style="margin:.8rem 0 0"><a href="#compliance" data-pre="compliance:status:">See everyone who needs action →</a></p>` : ""}
           </div>
           <div class="card">
-            <h2>Upcoming sessions</h2>
+            <div class="card-head"><h2>Upcoming sessions</h2><a href="#sessions" data-pre="sessions:when:upcoming">Open Sessions & attendance →</a></div>
             <div class="table-wrap"><table>
               <thead><tr><th>Date</th><th>Course</th><th>Facility</th><th>Booked</th></tr></thead>
               <tbody>${upcoming.map((s) => `
-                <tr><td>${fmtDateTime(s.starts_at)}</td><td>${esc(courseTitle(s.course_id))}</td>
+                <tr class="row-link" tabindex="0" data-go="#sessions/${s.id}" data-pre="sessions:when:upcoming" title="Open attendance for this session"><td>${fmtDateTime(s.starts_at)}</td><td>${esc(courseTitle(s.course_id))}</td>
                   <td>${esc(facilityName(s.facility_id))}</td>
                   <td>${s.attendance[0]?.count ?? 0}${s.capacity ? " / " + s.capacity : ""}</td></tr>`).join("")
                 || `<tr><td colspan="4" class="empty">No sessions scheduled. <a href="#sessions">Schedule one</a></td></tr>`}
               </tbody></table></div>
           </div>
         </div>`;
-      $$("[data-emp]", view).forEach((b) => b.onclick = () => showEmployee(Number(b.dataset.emp)));
+      $$("[data-emp]", view).forEach((b) => b.onclick = (e) => { e.stopPropagation(); showEmployee(Number(b.dataset.emp)); });
+      wireLinks(view);
     }
   };
 
@@ -950,6 +951,12 @@
       $$("[data-f]", view).forEach((inp) => inp.addEventListener("input", () => { f[inp.dataset.f] = inp.value; route(); }));
       $$("[data-att]", view).forEach((b) => b.onclick = () => manageAttendance(sessions.find((s) => s.id === Number(b.dataset.att))));
       $$("[data-edit]", view).forEach((b) => b.onclick = () => editSession(sessions.find((s) => s.id === Number(b.dataset.edit))));
+      if (this.arg) {
+        const sid = Number(this.arg); this.arg = undefined;
+        history.replaceState(null, "", "#sessions");
+        const one = sessions.find((s) => s.id === sid) || (await sb.from("sessions").select("*").eq("id", sid).maybeSingle()).data;
+        if (one) manageAttendance(one);
+      }
       $$("[data-del]", view).forEach((b) => b.onclick = async () => {
         if (!(await confirmBox("Delete this session and its attendance list? Training records already created are kept."))) return;
         try { check(await sb.from("sessions").delete().eq("id", Number(b.dataset.del))); toast("Session deleted"); route(); }
@@ -1965,6 +1972,217 @@
 
     show();
   }
+
+  // =============================================================== CLICK-THROUGHS
+  // data-pre="view:filter:value" sets that page's filter before going there; data-go makes a row a link
+  function applyPre(el) {
+    const pre = el.dataset.pre; if (!pre) return;
+    const [vName, key, ...rest] = pre.split(":"); const val = rest.join(":");
+    const v = views[vName]; if (!v || !v.filters) return;
+    if (vName === "compliance") Object.assign(v.filters, { status: "", month: "", facility: v.filters.facility, course: "" });
+    if (vName === "compliance" && key !== "facility" && !isAdmin()) v.filters.facility = "";
+    v.filters[key] = val;
+  }
+  function wireLinks(root) {
+    $$("a[data-pre]", root).forEach((a) => a.addEventListener("click", () => applyPre(a)));
+    $$("[data-go], [data-open-emp]", root).forEach((row) => {
+      const go = () => {
+        if (row.dataset.openEmp) return showEmployee(Number(row.dataset.openEmp));
+        applyPre(row); goTo(row.dataset.go);
+      };
+      row.addEventListener("click", (e) => { if (!e.target.closest("a, button")) go(); });
+      row.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); go(); } });
+    });
+  }
+
+  // ---- Chart tooltip (one for the page; values lead, labels follow)
+  function vizTip() {
+    let t = $("#vizTip");
+    if (!t) { t = document.createElement("div"); t.id = "vizTip"; t.className = "viz-tip hidden"; t.setAttribute("role", "tooltip"); document.body.appendChild(t); }
+    return t;
+  }
+  function wireTips(root) {
+    const tip = vizTip();
+    const showFor = (el, x, y) => {
+      tip.replaceChildren();
+      const v = document.createElement("strong"); v.textContent = el.dataset.tipValue || "";
+      const l = document.createElement("span"); l.textContent = el.dataset.tipLabel || "";
+      tip.append(v, l);
+      if (el.dataset.tipHint) { const h = document.createElement("em"); h.textContent = el.dataset.tipHint; tip.append(h); }
+      tip.classList.remove("hidden");
+      const r = tip.getBoundingClientRect();
+      tip.style.left = Math.max(8, Math.min(window.innerWidth - r.width - 8, x - r.width / 2)) + "px";
+      tip.style.top = Math.max(8, y - r.height - 12) + "px";
+    };
+    $$("[data-tip-value]", root).forEach((el) => {
+      el.addEventListener("pointermove", (e) => showFor(el, e.clientX, e.clientY));
+      el.addEventListener("pointerleave", () => tip.classList.add("hidden"));
+      el.addEventListener("focus", () => { const r = el.getBoundingClientRect(); showFor(el, r.left + r.width / 2, r.top); });
+      el.addEventListener("blur", () => tip.classList.add("hidden"));
+    });
+  }
+
+  // =============================================================== COMPLIANCE (charts)
+  const ST_ORDER = ["valid", "expiring", "expired", "missing"];
+  const ST_LABEL = { valid: "Up to date", expiring: `Due in ${WARN_DAYS} days`, expired: "Expired", missing: "Never done" };
+  const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
+
+  function stackRow(label, list, filterKey, filterVal, extra = "") {
+    const total = list.length;
+    const c = Object.fromEntries(ST_ORDER.map((st) => [st, list.filter((i) => i.status === st).length]));
+    const pct = total ? Math.round((c.valid + c.expiring) / total * 100) : 100;
+    return `<div class="stack-row">
+      <div class="stack-label"><strong>${esc(label)}</strong><span class="muted">${extra}</span></div>
+      <div class="stack" role="img" aria-label="${esc(label)}: ${ST_ORDER.map((st) => `${c[st]} ${ST_LABEL[st].toLowerCase()}`).join(", ")}">
+        ${total ? ST_ORDER.filter((st) => c[st]).map((st) => `<button type="button" class="seg seg-${st}" style="flex-grow:${c[st]}"
+          data-tip-value="${c[st]} of ${total} (${Math.round(c[st] / total * 100)}%)" data-tip-label="${esc(label)} · ${ST_LABEL[st]}" data-tip-hint="Click to list them"
+          data-seg="${st}" ${filterKey ? `data-fk="${filterKey}" data-fv="${esc(filterVal)}"` : ""} aria-label="${esc(label)}, ${ST_LABEL[st]}: ${c[st]}"></button>`).join("")
+          : `<span class="stack-empty">No mandatory training</span>`}
+      </div>
+      <div class="stack-pct"><strong>${pct}%</strong><span class="muted">current</span></div>
+    </div>`;
+  }
+
+  views.compliance = {
+    title: "Compliance", navAs: "compliance",
+    filters: { facility: "", course: "", status: "", month: "", q: "" },
+    actions() { return `<button class="secondary" data-act="excel">Download Excel</button>`; },
+    async render(view) {
+      const f = this.filters;
+      if (!isAdmin()) f.facility = "";
+      const employees = await loadEmployees({ activeOnly: true });
+      const { items: all } = await complianceMatrix(employees);
+      const mandatory = state.courses.filter((c) => c.mandatory && c.active);
+      const homes = state.facilities.filter((x) => isAdmin() || x.id === state.me.facility_id);
+      const scoped = all.filter((i) => (!f.facility || String(i.employee.facility_id) === f.facility) && (!f.course || String(i.course.id) === f.course));
+      const n = (st, list = scoped) => list.filter((i) => i.status === st).length;
+      const current = n("valid") + n("expiring");
+      const pct = scoped.length ? Math.round(current / scoped.length * 100) : 100;
+      const people = new Set(scoped.map((i) => i.employee.id)).size;
+
+      // Expiry forecast: next 12 months, by month the current certificate runs out
+      const months = [...Array(12)].map((_, k) => { const d = new Date(); d.setDate(1); d.setMonth(d.getMonth() + k); return d.toISOString().slice(0, 7); });
+      const byMonth = months.map((m) => ({ m, items: scoped.filter((i) => i.expires_on && i.expires_on.slice(0, 7) === m && i.status !== "expired") }));
+      const maxM = Math.max(1, ...byMonth.map((x) => x.items.length));
+      const peak = byMonth.reduce((a, b) => (b.items.length > a.items.length ? b : a), byMonth[0]);
+      const monthName = (m, long) => new Date(m + "-01T00:00:00").toLocaleDateString(undefined, long ? { month: "long", year: "numeric" } : { month: "short" });
+
+      // Action list
+      const statusOk = (i) => f.month ? (i.expires_on && i.expires_on.slice(0, 7) === f.month && i.status !== "expired")
+        : f.status === "all" ? true : f.status ? i.status === f.status : i.status !== "valid";
+      const q = f.q.toLowerCase();
+      const list = scoped.filter(statusOk).filter((i) => !q || fullName(i.employee).toLowerCase().includes(q) || i.course.title.toLowerCase().includes(q))
+        .sort((a, b) => ST_ORDER.indexOf(b.status) - ST_ORDER.indexOf(a.status) || String(a.expires_on || "").localeCompare(String(b.expires_on || "")) || fullName(a.employee).localeCompare(fullName(b.employee)));
+      const listTitle = f.month ? `Expiring in ${monthName(f.month, true)}` : f.status === "all" ? "Everyone" : f.status ? ST_LABEL[f.status] : "Needs action";
+      const daysTo = (d) => d ? Math.round((new Date(d + "T00:00:00") - new Date(todayISO() + "T00:00:00")) / 86400000) : null;
+
+      view.innerHTML = `
+        <div class="filter-row">
+          ${isAdmin() ? `<label>Home <select data-f="facility">${facilityOptions(f.facility, { includeAll: true })}</select></label>` : ""}
+          <label>Course <select data-f="course"><option value="">All mandatory courses</option>${mandatory.map((c) => `<option value="${c.id}" ${String(c.id) === f.course ? "selected" : ""}>${esc(c.title)}</option>`).join("")}</select></label>
+          ${f.facility || f.course ? `<button type="button" class="link small" data-clear>Clear filters</button>` : ""}
+        </div>
+
+        ${!mandatory.length ? `<div class="card empty">No mandatory courses yet. Mark courses as mandatory on the <a href="#courses">Courses</a> page to track compliance.</div>` : `
+        <div class="card hero-card">
+          <div class="hero-num">
+            <span class="hero-value">${pct}%</span>
+            <span class="hero-label">of mandatory training is current</span>
+            <span class="muted">${plural(people, "employee", "employees")} · ${plural(f.course ? 1 : mandatory.length, "course", "courses")} · ${plural(scoped.length, "requirement", "requirements")}</span>
+          </div>
+          <div class="hero-break">
+            ${stackRow("All requirements", scoped, null, null)}
+            <ul class="legend">${ST_ORDER.map((st) => `<li><button type="button" class="legend-btn" data-legend="${st}"><span class="sw sw-${st}" aria-hidden="true"></span>${ST_LABEL[st]} <strong>${n(st)}</strong></button></li>`).join("")}</ul>
+          </div>
+        </div>
+
+        <div class="cols">
+          ${homes.length > 1 && !f.facility ? `<div class="card">
+            <h2>By home</h2>
+            <p class="muted chart-sub">Share of each home's mandatory training. Click a colour to list those people.</p>
+            ${homes.map((h) => { const l = scoped.filter((i) => i.employee.facility_id === h.id);
+              return stackRow(h.name, l, "facility", String(h.id), plural(new Set(l.map((i) => i.employee.id)).size, "employee", "employees")); }).join("")}
+            <details class="table-view"><summary>View as table</summary><div class="table-wrap"><table>
+              <thead><tr><th>Home</th>${ST_ORDER.map((st) => `<th>${ST_LABEL[st]}</th>`).join("")}<th>Current</th></tr></thead>
+              <tbody>${homes.map((h) => { const l = scoped.filter((i) => i.employee.facility_id === h.id);
+                return `<tr><td>${esc(h.name)}</td>${ST_ORDER.map((st) => `<td>${n(st, l)}</td>`).join("")}<td>${l.length ? Math.round((n("valid", l) + n("expiring", l)) / l.length * 100) : 100}%</td></tr>`; }).join("")}</tbody></table></div></details>
+          </div>` : ""}
+          ${!f.course ? `<div class="card">
+            <h2>By course</h2>
+            <p class="muted chart-sub">Worst first. Click a colour to list those people.</p>
+            ${mandatory.map((c) => ({ c, l: scoped.filter((i) => i.course.id === c.id) }))
+              .sort((a, b) => (n("valid", a.l) + n("expiring", a.l)) / (a.l.length || 1) - (n("valid", b.l) + n("expiring", b.l)) / (b.l.length || 1))
+              .map(({ c, l }) => stackRow(c.title, l, "course", String(c.id), c.validity_months ? `renew every ${c.validity_months} months` : "no expiry")).join("")}
+            <details class="table-view"><summary>View as table</summary><div class="table-wrap"><table>
+              <thead><tr><th>Course</th>${ST_ORDER.map((st) => `<th>${ST_LABEL[st]}</th>`).join("")}</tr></thead>
+              <tbody>${mandatory.map((c) => { const l = scoped.filter((i) => i.course.id === c.id); return `<tr><td>${esc(c.title)}</td>${ST_ORDER.map((st) => `<td>${n(st, l)}</td>`).join("")}</tr>`; }).join("")}</tbody></table></div></details>
+          </div>` : ""}
+        </div>
+
+        <div class="card">
+          <h2>Renewals coming up</h2>
+          <p class="muted chart-sub">Certificates that run out each month over the next year${peak.items.length ? `. Busiest: <strong>${monthName(peak.m, true)}</strong> (${peak.items.length})` : ""}. Click a month to see who.</p>
+          <div class="cols-chart" role="img" aria-label="Certificates expiring per month for the next 12 months">
+            <span class="cols-max" aria-hidden="true">${maxM}</span>
+            <div class="cols-grid" aria-hidden="true"><span></span><span></span><span></span></div>
+            ${byMonth.map((x) => `<button type="button" class="col ${f.month === x.m ? "is-on" : ""}" data-month="${x.m}"
+                data-tip-value="${plural(x.items.length, "certificate", "certificates")}" data-tip-label="Expire in ${monthName(x.m, true)}" ${x.items.length ? `data-tip-hint="Click to list them"` : ""}
+                aria-label="${monthName(x.m, true)}: ${x.items.length}">
+                <span class="col-val">${x === peak && x.items.length ? x.items.length : ""}</span>
+                <span class="col-bar" style="height:${x.items.length ? Math.max(4, Math.round(x.items.length / maxM * 100)) : 0}%"></span>
+                <span class="col-lbl">${monthName(x.m)}</span></button>`).join("")}
+          </div>
+          <details class="table-view"><summary>View as table</summary><div class="table-wrap"><table>
+            <thead><tr><th>Month</th><th>Certificates expiring</th></tr></thead>
+            <tbody>${byMonth.map((x) => `<tr><td>${monthName(x.m, true)}</td><td>${x.items.length}</td></tr>`).join("")}</tbody></table></div></details>
+        </div>
+
+        <div class="card" id="actionList">
+          <div class="card-head"><h2>${esc(listTitle)} <span class="muted" style="font-weight:500">(${list.length})</span></h2>
+            <div class="toolbar" style="margin:0">
+              <input type="search" placeholder="Search name or course…" value="${esc(f.q)}" data-f="q" style="min-width:200px">
+              <select data-f="status">
+                <option value="" ${!f.status && !f.month ? "selected" : ""}>Needs action</option>
+                ${ST_ORDER.map((st) => `<option value="${st}" ${f.status === st && !f.month ? "selected" : ""}>${ST_LABEL[st]}</option>`).join("")}
+                <option value="all" ${f.status === "all" && !f.month ? "selected" : ""}>Everyone</option>
+                ${f.month ? `<option selected>Expiring in ${monthName(f.month, true)}</option>` : ""}
+              </select></div></div>
+          <div class="table-wrap"><table>
+            <thead><tr><th>Employee</th><th>Home</th><th>Course</th><th>Status</th><th>Expires</th><th></th></tr></thead>
+            <tbody>${list.slice(0, 300).map((i) => { const d = daysTo(i.expires_on);
+              return `<tr class="row-link" tabindex="0" data-open-emp="${i.employee.id}">
+                <td><strong>${esc(fullName(i.employee))}</strong></td><td>${esc(facilityName(i.employee.facility_id))}</td><td>${esc(i.course.title)}</td>
+                <td><span class="st-chip"><span class="sw sw-${i.status}" aria-hidden="true"></span>${ST_LABEL[i.status]}</span></td>
+                <td>${i.expires_on ? `${fmtDate(i.expires_on)} <span class="muted">(${d < 0 ? `${-d} days ago` : d === 0 ? "today" : `in ${d} days`})</span>` : "—"}</td>
+                <td class="actions"><span class="muted small-arrow">Open →</span></td></tr>`; }).join("")
+              || `<tr><td colspan="6" class="empty">${f.status || f.month ? "No one in this group." : "Everyone is up to date. 🎉"}</td></tr>`}
+              ${list.length > 300 ? `<tr><td colspan="6" class="empty">Showing the first 300. Download Excel for the full list.</td></tr>` : ""}
+            </tbody></table></div>
+        </div>`}`;
+
+      const self = this;
+      const focusList = () => setTimeout(() => $("#actionList")?.scrollIntoView({ behavior: "smooth", block: "start" }), 50);
+      $$("[data-f]", view).forEach((inp) => inp.addEventListener(inp.dataset.f === "q" ? "change" : "input", () => {
+        f[inp.dataset.f] = inp.value; if (inp.dataset.f === "status") f.month = "";
+        route().then(() => { if (inp.dataset.f === "q" || inp.dataset.f === "status") focusList(); });
+      }));
+      $("[data-clear]", view)?.addEventListener("click", () => { f.facility = ""; f.course = ""; route(); });
+      $$("[data-seg]", view).forEach((b) => b.addEventListener("click", () => {
+        f.status = b.dataset.seg; f.month = "";
+        if (b.dataset.fk) f[b.dataset.fk] = b.dataset.fv;
+        vizTip().classList.add("hidden"); route().then(focusList);
+      }));
+      $$("[data-legend]", view).forEach((b) => b.addEventListener("click", () => { f.status = b.dataset.legend; f.month = ""; route().then(focusList); }));
+      $$("[data-month]", view).forEach((b) => b.addEventListener("click", () => { f.month = f.month === b.dataset.month ? "" : b.dataset.month; f.status = ""; vizTip().classList.add("hidden"); route().then(focusList); }));
+      wireTips(view); wireLinks(view);
+      this.onAction = (act) => {
+        if (act === "excel") downloadXLSX(`TrainWell-compliance-${todayISO()}.xlsx`, "Compliance", [
+          ["Employee", "Home", "Course", "Status", "Expires", "Last completed"],
+          ...list.map((i) => [fullName(i.employee), facilityName(i.employee.facility_id), i.course.title, ST_LABEL[i.status], toDate(i.expires_on), toDate(i.completed_on)])
+        ]).catch((ex) => toast(ex.message, true));
+      };
+    }
+  };
 
   // -------------------------------------------------------- users (admin)
   views.users = {
