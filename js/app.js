@@ -24,10 +24,21 @@
     const d = new Date(); d.setDate(d.getDate() + n); d.setMinutes(d.getMinutes() - d.getTimezoneOffset());
     return d.toISOString().slice(0, 10);
   };
-  const fmtDate = (v) => v ? new Date(v.length === 10 ? v + "T00:00:00" : v)
-    .toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" }) : "—";
-  const fmtDateTime = (v) => v ? new Date(v).toLocaleString(undefined,
-    { year: "numeric", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }) : "—";
+  // All dates are shown as MM/DD/YYYY
+  const pad2 = (n) => String(n).padStart(2, "0");
+  const mdy = (v) => {
+    if (!v) return "";
+    const s = String(v);
+    if (/^\d{4}-\d{2}-\d{2}$/.test(s)) { const [y, m, d] = s.split("-"); return `${m}/${d}/${y}`; }
+    const d = new Date(s);
+    return isNaN(d) ? s : `${pad2(d.getMonth() + 1)}/${pad2(d.getDate())}/${d.getFullYear()}`;
+  };
+  const fmtDate = (v) => (v ? mdy(v) : "—");
+  const fmtDateTime = (v) => {
+    if (!v) return "—";
+    const d = new Date(v); let h = d.getHours(); const ap = h >= 12 ? "PM" : "AM"; h = h % 12 || 12;
+    return `${mdy(v)} ${h}:${pad2(d.getMinutes())} ${ap}`;
+  };
   const toLocalInput = (v) => {
     if (!v) return "";
     const d = new Date(v); d.setMinutes(d.getMinutes() - d.getTimezoneOffset());
@@ -91,91 +102,207 @@
   }
 
   // ---------------------------------------------------------- Excel export
-  // SheetJS is loaded only when someone downloads, so normal pages stay fast.
-  let xlsxLoading = null;
-  function loadXLSX() {
-    if (window.XLSX) return Promise.resolve(window.XLSX);
-    if (!xlsxLoading) xlsxLoading = new Promise((resolve, reject) => {
-      const sc = document.createElement("script");
-      sc.src = "https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js";
-      sc.onload = () => resolve(window.XLSX);
-      sc.onerror = () => { xlsxLoading = null; reject(new Error("Could not load the Excel library. Check your internet connection and try again.")); };
+  // =============================================================== DOWNLOADS
+  // Every download can be Excel or PDF and contains exactly what the filters on screen show.
+  // The libraries load only when someone downloads, so normal pages stay fast.
+  const libCache = {};
+  function loadScript(src) {
+    if (!libCache[src]) libCache[src] = new Promise((resolve, reject) => {
+      const sc = document.createElement("script"); sc.src = src;
+      sc.onload = resolve;
+      sc.onerror = () => { delete libCache[src]; reject(new Error("Could not load the download tools. Check your internet connection and try again.")); };
       document.head.appendChild(sc);
     });
-    return xlsxLoading;
+    return libCache[src];
   }
-  // Dates go in as real Excel dates (serial numbers) so they never shift a day with time zones
-  const toDate = (v) => {
-    if (!v) return null;
-    const [y, m, d] = String(v).slice(0, 10).split("-").map(Number);
-    return { t: "n", v: (Date.UTC(y, m - 1, d) - Date.UTC(1899, 11, 30)) / 86400000, z: "yyyy-mm-dd" };
+  const loadExcelLib = () => loadScript("https://cdn.jsdelivr.net/npm/exceljs@4.4.0/dist/exceljs.min.js").then(() => window.ExcelJS);
+  const loadPdfLib = async () => {
+    await loadScript("https://cdn.jsdelivr.net/npm/jspdf@2.5.1/dist/jspdf.umd.min.js");
+    await loadScript("https://cdn.jsdelivr.net/npm/jspdf-autotable@3.8.2/dist/jspdf.plugin.autotable.min.js");
+    return window.jspdf.jsPDF;
   };
-  function sheetFrom(XLSX, rows, widths) {
-    const ws = XLSX.utils.aoa_to_sheet(rows);
-    ws["!cols"] = (widths || rows[0].map((h) => Math.max(12, String(h).length + 2))).map((w) => ({ wch: w }));
-    if (rows.length > 1) ws["!autofilter"] = { ref: XLSX.utils.encode_range({ s: { r: 0, c: 0 }, e: { r: rows.length - 1, c: rows[0].length - 1 } }) };
-    ws["!freeze"] = { xSplit: 0, ySplit: 1 };
-    return ws;
-  }
-  async function downloadXLSX(filename, sheetName, rows) {
-    const XLSX = await loadXLSX();
-    const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, sheetFrom(XLSX, rows), sheetName);
-    XLSX.writeFile(wb, filename);
-  }
-
   const STATUS_LABEL = { valid: "Up to date", expiring: "Due soon", expired: "Overdue", missing: "Missing" };
+  const ST_FILL = { valid: "E2F4EA", expiring: "FDF1DC", expired: "FBE5E3", missing: "FDE9DF" };
+  const ST_INK = { valid: "1F6B3A", expiring: "8A5208", expired: "A4271D", missing: "A6461C" };
+  const hexRgb = (h) => [0, 2, 4].map((i) => parseInt(h.slice(i, i + 2), 16));
+  const safeName = (t) => String(t).replace(/[^A-Za-z0-9]+/g, "-").replace(/^-|-$/g, "");
 
-  // Training records workbook: a matrix (people x courses, like the paper report) + the full list
-  async function downloadTrainingExcel(facilityFilter, records) {
-    toast("Preparing Excel file…");
-    const XLSX = await loadXLSX();
-    const facId = facilityFilter ? Number(facilityFilter) : null;
-    const employees = (await loadEmployees({ activeOnly: true })).filter((e) => !facId || e.facility_id === facId);
+  // spec = { file, title, subtitle, columns: [{ h, w, date, pdf }], rows: [[value | { v, date, st }]], note, freezeCols, totals }
+  const cellOf = (c) => (c && typeof c === "object" && !Array.isArray(c) ? c : { v: c });
+  const cellText = (c, col) => { const x = cellOf(c); if (x.v == null || x.v === "") return ""; return (x.date ?? col.date) && /^\d{4}-\d{2}-\d{2}/.test(String(x.v)) ? mdy(String(x.v).slice(0, 10)) : String(x.v); };
+
+  async function exportExcel(spec) {
+    const ExcelJS = await loadExcelLib();
+    const wb = new ExcelJS.Workbook(); wb.creator = "Train Well";
+    const ws = wb.addWorksheet(spec.title.slice(0, 31).replace(/[\\/?*[\]:]/g, " "));
+    const n = spec.columns.length;
+    ws.addRow([spec.title]).font = { bold: true, size: 14, color: { argb: "FF01452A" } };
+    ws.addRow([spec.subtitle || ""]).font = { italic: true, color: { argb: "FF5F6D6A" } };
+    const head = ws.addRow(spec.columns.map((c) => c.h));
+    head.eachCell((cell) => {
+      cell.font = { bold: true, color: { argb: "FFFFFFFF" } };
+      cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF016738" } };
+      cell.alignment = { vertical: "middle", wrapText: true };
+      cell.border = { bottom: { style: "thin", color: { argb: "FF01452A" } } };
+    });
+    head.height = 30;
+    for (const r of spec.rows) {
+      const row = ws.addRow(r.map((c, i) => {
+        const x = cellOf(c);
+        if (x.v == null || x.v === "") return null;
+        if ((x.date ?? spec.columns[i].date) && /^\d{4}-\d{2}-\d{2}/.test(String(x.v))) {
+          const [y, m, d] = String(x.v).slice(0, 10).split("-").map(Number);
+          return new Date(Date.UTC(y, m - 1, d));
+        }
+        return x.v;
+      }));
+      r.forEach((c, i) => {
+        const x = cellOf(c), cell = row.getCell(i + 1);
+        if (cell.value instanceof Date) cell.numFmt = "mm/dd/yyyy";
+        if (x.st && ST_FILL[x.st]) { cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF" + ST_FILL[x.st] } }; cell.font = { color: { argb: "FF" + ST_INK[x.st] } }; }
+        if (x.bold) cell.font = { ...(cell.font || {}), bold: true };
+      });
+    }
+    spec.columns.forEach((c, i) => { ws.getColumn(i + 1).width = c.w || Math.max(12, String(c.h).length + 2); });
+    ws.views = [{ state: "frozen", ySplit: 3, xSplit: spec.freezeCols || 0 }];
+    const dataRows = spec.rows.length - (spec.totals || 0);
+    if (dataRows > 0) ws.autoFilter = { from: { row: 3, column: 1 }, to: { row: 3 + dataRows, column: n } };
+    if (spec.note) { ws.addRow([]); ws.addRow([spec.note]).font = { italic: true, color: { argb: "FF5F6D6A" } }; }
+    const buf = await wb.xlsx.writeBuffer();
+    saveBlob(new Blob([buf], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" }), `${spec.file}.xlsx`);
+  }
+
+  async function exportPDF(spec) {
+    const jsPDF = await loadPdfLib();
+    const cols = spec.columns.map((c, i) => ({ ...c, i })).filter((c) => c.pdf !== false);
+    const doc = new jsPDF({ orientation: cols.length > 5 ? "landscape" : "portrait", unit: "pt", format: "letter" });
+    const W = doc.internal.pageSize.getWidth();
+    doc.setFont("helvetica", "bold"); doc.setFontSize(15); doc.setTextColor(1, 69, 42); doc.text(spec.title, 36, 40);
+    doc.setFont("helvetica", "normal"); doc.setFontSize(9); doc.setTextColor(95, 109, 106);
+    doc.text(doc.splitTextToSize(spec.subtitle || "", W - 72), 36, 56);
+    const fs = cols.length > 14 ? 6.5 : cols.length > 9 ? 7.5 : 9;
+    doc.autoTable({
+      startY: 70, margin: { left: 36, right: 36 },
+      head: [cols.map((c) => c.h)],
+      body: spec.rows.map((r) => cols.map((c) => cellText(r[c.i], c))),
+      styles: { fontSize: fs, cellPadding: 3, overflow: "linebreak", valign: "middle" },
+      headStyles: { fillColor: [1, 103, 56], textColor: 255, fontStyle: "bold" },
+      alternateRowStyles: { fillColor: [248, 250, 249] },
+      columnStyles: Object.fromEntries(cols.map((c, k) => [k, c.pdfW ? { cellWidth: c.pdfW } : {}])),
+      didParseCell: (h) => {
+        if (h.section !== "body") return;
+        const x = cellOf(spec.rows[h.row.index][cols[h.column.index].i]);
+        if (x.st && ST_FILL[x.st]) { h.cell.styles.fillColor = hexRgb(ST_FILL[x.st]); h.cell.styles.textColor = hexRgb(ST_INK[x.st]); }
+        if (x.bold) h.cell.styles.fontStyle = "bold";
+      },
+      didDrawPage: () => {
+        doc.setFontSize(8); doc.setTextColor(140);
+        doc.text(`Train Well · exported ${mdy(todayISO())}`, 36, doc.internal.pageSize.getHeight() - 18);
+        doc.text(`Page ${doc.internal.getNumberOfPages()}`, W - 36, doc.internal.pageSize.getHeight() - 18, { align: "right" });
+      }
+    });
+    if (spec.note) {
+      const y = Math.min(doc.lastAutoTable.finalY + 16, doc.internal.pageSize.getHeight() - 40);
+      doc.setFontSize(8); doc.setTextColor(95, 109, 106); doc.text(doc.splitTextToSize(spec.note, W - 72), 36, y);
+    }
+    doc.save(`${spec.file}.pdf`);
+  }
+
+  function saveBlob(blob, name) {
+    const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = name;
+    document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+  }
+
+  // Ask "Excel or PDF?", then build the file from what's on screen right now
+  function offerDownload(build, what = "this list") {
+    const { form, close } = openModal({
+      title: "Download", footer: "",
+      body: `<p class="muted" style="margin-top:0">Download ${esc(what)}, exactly as filtered on screen.</p>
+        <div class="dl-choices">
+          <button type="button" class="dl-choice" data-fmt="xlsx"><strong>Excel</strong><span>.xlsx · sort and filter</span></button>
+          <button type="button" class="dl-choice" data-fmt="pdf"><strong>PDF</strong><span>ready to print or email</span></button>
+        </div>`
+    });
+    $$("[data-fmt]", form).forEach((b) => b.onclick = async () => {
+      $$("[data-fmt]", form).forEach((x) => (x.disabled = true)); b.classList.add("is-busy");
+      try {
+        const spec = await build();
+        if (!spec.rows.length) throw new Error("There's nothing to download with the current filters.");
+        await (b.dataset.fmt === "pdf" ? exportPDF(spec) : exportExcel(spec));
+        close(); toast(b.dataset.fmt === "pdf" ? "PDF downloaded" : "Excel file downloaded");
+      } catch (ex) { close(); toast(ex.message, true); }
+    });
+  }
+  const filterLine = (parts) => parts.filter(Boolean).join(" · ") + ` · exported ${mdy(todayISO())}`;
+
+  // Training matrix: one row per employee, one column per course (expiry date, coloured by status)
+  async function trainingMatrixSpec(f) {
+    const facId = f.facility ? Number(f.facility) : (isAdmin() ? null : state.me.facility_id);
+    const q = (f.q || "").toLowerCase();
+    let employees = (await loadEmployees({ activeOnly: true })).filter((e) => (!facId || e.facility_id === facId)
+      && (!q || `${e.first_name} ${e.last_name} ${e.employee_no || ""}`.toLowerCase().includes(q)));
     const status = await fetchAll(() => sb.from("training_status").select("*"));
     const map = new Map(status.map((s) => [`${s.employee_id}:${s.course_id}`, s]));
-    const courses = state.courses.filter((c) => c.active);
+    const courses = f.course ? state.courses.filter((c) => String(c.id) === String(f.course)) : state.courses.filter((c) => c.active);
+    const one = courses.length === 1 ? courses[0] : null;
+    const cell = (e, c) => {
+      const s = map.get(`${e.id}:${c.id}`);
+      if (!s) return c.mandatory || one ? { v: "Missing", st: "missing" } : { v: "" };
+      const st = expiryStatus(s.expires_on);
+      return s.expires_on ? { v: s.expires_on, date: true, st } : { v: "No expiry", st };
+    };
+    if (f.status) employees = employees.filter((e) => courses.some((c) => cell(e, c).st === f.status));
+    employees.sort((a, b) => a.last_name.localeCompare(b.last_name) || a.first_name.localeCompare(b.first_name));
 
-    // Sheet 1: matrix
-    const head = ["Employee", "Facility", "Job title", ...courses.map((c) => c.title + (c.mandatory ? "" : " (optional)"))];
-    const matrix = [head];
-    for (const e of employees) {
-      const row = [`${e.last_name}, ${e.first_name}`, facilityName(e.facility_id), e.job_title || ""];
-      for (const c of courses) {
-        const s = map.get(`${e.id}:${c.id}`);
-        if (!s) { row.push(c.mandatory ? "Missing" : ""); continue; }
-        const label = STATUS_LABEL[expiryStatus(s.expires_on)];
-        row.push(s.expires_on ? `${label} (${s.expires_on})` : label);
+    const columns = [{ h: "Employee", w: 26, pdfW: 110 }, { h: "Home", w: 24 }, { h: "Job title", w: 18, pdf: !one ? false : true }];
+    if (one) columns.push({ h: "Completed", w: 13, date: true }, { h: "Expires", w: 13, date: true }, { h: "Status", w: 13 });
+    else courses.forEach((c) => columns.push({ h: c.title + (c.mandatory ? "" : " (optional)"), w: Math.min(22, Math.max(13, c.title.length + 2)), date: true }));
+
+    const rows = employees.map((e) => {
+      const base = [{ v: `${e.last_name}, ${e.first_name}`, bold: true }, facilityName(e.facility_id), e.job_title || ""];
+      if (one) {
+        const s = map.get(`${e.id}:${one.id}`), x = cell(e, one);
+        return [...base, s?.completed_on ? { v: s.completed_on, date: true } : "", s?.expires_on ? { v: s.expires_on, date: true, st: x.st } : "", { v: STATUS_LABEL[x.st] || "", st: x.st }];
       }
-      matrix.push(row);
-    }
-    // Totals per course
-    matrix.push([]);
-    for (const key of ["valid", "expiring", "expired", "missing"]) {
-      const row = [STATUS_LABEL[key], "", ""];
-      for (const c of courses) {
-        row.push(employees.filter((e) => {
-          const s = map.get(`${e.id}:${c.id}`);
-          return key === "missing" ? (!s && c.mandatory) : (s && expiryStatus(s.expires_on) === key);
-        }).length);
+      return [...base, ...courses.map((c) => cell(e, c))];
+    });
+    let totals = 0;
+    if (!one && employees.length) {
+      rows.push(columns.map(() => ""));
+      for (const st of ["valid", "expiring", "expired", "missing"]) {
+        rows.push([{ v: `Total: ${STATUS_LABEL[st]}`, bold: true }, "", "", ...courses.map((c) => ({ v: employees.filter((e) => cell(e, c).st === st).length, st }))]);
       }
-      matrix.push(row);
+      totals = 5;
     }
-    const mWs = sheetFrom(XLSX, matrix, [26, 24, 18, ...courses.map(() => 24)]);
-    mWs["!autofilter"] = { ref: XLSX.utils.encode_range({ s: { r: 0, c: 0 }, e: { r: employees.length, c: head.length - 1 } }) };
+    const title = one ? `Training: ${one.title}` : "Training matrix";
+    return {
+      file: `TrainWell-${one ? safeName(one.title) : "training"}${facId ? "-" + safeName(facilityName(facId)) : ""}-${todayISO()}`,
+      title, freezeCols: 1, totals, columns, rows,
+      subtitle: filterLine([facId ? facilityName(facId) : "All homes", one ? one.title : `${courses.length} courses`,
+        f.status ? `Status: ${STATUS_LABEL[f.status]}` : "", f.q ? `Search: "${f.q}"` : "", `${employees.length} employees`]),
+      note: one ? "Colours: green up to date · amber due within " + WARN_DAYS + " days · red overdue · orange never done."
+        : "Each course column shows the expiry date. Colours: green up to date · amber due within " + WARN_DAYS + " days · red overdue · orange never done. \"No expiry\" = completed, never expires."
+    };
+  }
 
-    // Sheet 2: every record currently shown on the page
-    const list = [["Employee", "Facility", "Course", "Completed", "Expires", "Status", "Score", "Certificate #", "Notes"]];
-    for (const r of records) list.push([
-      `${r.employees.last_name}, ${r.employees.first_name}`, facilityName(r.employees.facility_id), courseTitle(r.course_id),
-      toDate(r.completed_on), toDate(r.expires_on), STATUS_LABEL[expiryStatus(r.expires_on)],
-      r.score ?? "", r.certificate_no || "", r.notes || ""]);
-
-    const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, mWs, "Training matrix");
-    XLSX.utils.book_append_sheet(wb, sheetFrom(XLSX, list, [26, 24, 34, 12, 12, 12, 8, 14, 50]), "All records");
-    const facPart = facId ? "-" + facilityName(facId).replace(/[^A-Za-z0-9]+/g, "-") : "";
-    XLSX.writeFile(wb, `TrainWell-training${facPart}-${todayISO()}.xlsx`);
+  async function drillsSpec(drills, f) {
+    const ids = drills.map((d) => d.id), parts = [];
+    for (let i = 0; i < ids.length; i += 200)
+      parts.push(...check(await sb.from("fire_drill_participants").select("drill_id, name").in("drill_id", ids.slice(i, i + 200))));
+    const columns = [{ h: "Date", w: 12, date: true }, { h: "Home", w: 26 }, { h: "Type of event", w: 20 }, { h: "Activities", w: 30, pdf: false },
+      { h: "Start", w: 8 }, { h: "End", w: 8 }, { h: "Total (min)", w: 10 },
+      ...DRILL_QUESTIONS.map((q) => ({ h: q[1], w: 16, pdf: false })), { h: "Issues", w: 8 }, { h: "Problems / actions for improvement", w: 40, pdfW: 150 },
+      { h: "Coordinator", w: 20 }, { h: "Observer", w: 20, pdf: false }, { h: "Observer date", w: 12, date: true, pdf: false }, { h: "Participants", w: 12 }, { h: "Participant names", w: 60, pdf: false }];
+    const rows = drills.map((d) => {
+      const names = parts.filter((p) => p.drill_id === d.id).map((p) => p.name).sort();
+      const n = drillIssues(d);
+      return [d.drill_date, facilityName(d.facility_id), DRILL_TYPE[d.event_type] || "", DRILL_ACTIVITY[d.activity] || "",
+        hhmm(d.start_time), hhmm(d.end_time), drillMinutes(d) ?? "", ...DRILL_QUESTIONS.map(([k]) => ANSWER[d[k]] || ""),
+        { v: n, st: n ? "expired" : "valid" }, d.problems || "", d.coordinator || "", d.observer_name || "", d.observer_date || "", names.length, names.join(", ")];
+    });
+    return { file: `TrainWell-fire-drills${f.facility ? "-" + safeName(facilityName(Number(f.facility))) : ""}${f.year ? "-" + f.year : ""}-${todayISO()}`,
+      title: "Fire drill reports", columns, rows,
+      subtitle: filterLine([f.facility ? facilityName(Number(f.facility)) : (isAdmin() ? "All homes" : facilityName(state.me.facility_id)), f.year ? `Year ${f.year}` : "All years", `${rows.length} reports`]) };
   }
 
   function parseCSV(text) {
@@ -420,7 +547,7 @@
     filters: { q: "", facility: "", status: "active" },
     actions() {
       return `<button class="secondary" data-act="import">Import CSV</button>
-              <button class="secondary" data-act="export">Download Excel</button>
+              <button class="secondary" data-act="export">Download</button>
               <button data-act="add">+ Add employee</button>`;
     },
     async render(view) {
@@ -453,6 +580,7 @@
             <tbody data-rows></tbody></table></div>
         </div>`;
 
+      let shownEmps = all;
       const draw = () => {
         const q = f.q.toLowerCase();
         const rows = all.filter((e) =>
@@ -460,7 +588,7 @@
           (!f.status || e.status === f.status) &&
           (!q || [e.employee_no, e.first_name, e.last_name, e.job_title, e.department, e.email]
             .some((v) => String(v || "").toLowerCase().includes(q))));
-        $("[data-count]", view).textContent = `${rows.length} of ${all.length}`;
+        $("[data-count]", view).textContent = `${rows.length} of ${all.length}`; shownEmps = rows;
         $("[data-rows]", view).innerHTML = rows.map((e) => {
           const g = e.status === "active" ? gaps(e) : null;
           return `<tr>
@@ -491,11 +619,15 @@
       this.onAction = (act) => {
         if (act === "add") editEmployee(null);
         if (act === "import") importEmployees();
-        if (act === "export") downloadXLSX(`TrainWell-employees-${todayISO()}.xlsx`, "Employees", [
-          ["First name", "Last name", "Email", "Phone", "Job title", "Department", "Facility", "Hire date", "Status"],
-          ...all.map((e) => [e.first_name, e.last_name, e.email || "", e.phone || "", e.job_title || "", e.department || "",
-            facilityName(e.facility_id), toDate(e.hire_date), e.status])
-        ]).catch((ex) => toast(ex.message, true));
+        if (act === "export") offerDownload(async () => ({
+          file: `TrainWell-employees${f.facility ? "-" + safeName(facilityName(Number(f.facility))) : ""}-${todayISO()}`, title: "Employees",
+          subtitle: filterLine([f.facility ? facilityName(Number(f.facility)) : (isAdmin() ? "All homes" : facilityName(state.me.facility_id)),
+            f.status ? (f.status === "active" ? "Active" : "Inactive") : "All statuses", f.q ? `Search: "${f.q}"` : "", `${shownEmps.length} employees`]),
+          columns: [{ h: "Last name", w: 16 }, { h: "First name", w: 16 }, { h: "Job title", w: 20 }, { h: "Department", w: 18 }, { h: "Home", w: 24 },
+            { h: "Email", w: 28 }, { h: "Phone", w: 15 }, { h: "Hire date", w: 12, date: true }, { h: "Status", w: 10 }],
+          rows: shownEmps.map((e) => [e.last_name, e.first_name, e.job_title || "", e.department || "", facilityName(e.facility_id),
+            e.email || "", e.phone || "", e.hire_date || "", { v: e.status === "active" ? "Active" : "Inactive", st: e.status === "active" ? "valid" : "expired" }])
+        }), "the employees list");
       };
     }
   };
@@ -778,7 +910,7 @@
     title: "Training records",
     filters: { q: "", course: "", status: "", facility: "" },
     actions() {
-      return `<button class="secondary" data-act="excel">Download Excel</button>
+      return `<button class="secondary" data-act="excel">Download</button>
               <button data-act="add">+ Record training</button>`;
     },
     async render(view) {
@@ -834,7 +966,7 @@
       draw();
       this.onAction = (act) => {
         if (act === "add") editRecord(null);
-        if (act === "excel") downloadTrainingExcel(f.facility, shown).catch((ex) => toast(ex.message, true));
+        if (act === "excel") offerDownload(() => trainingMatrixSpec(f), f.course ? `the ${courseTitle(Number(f.course))} records` : "the training matrix (one column per course)");
       };
     }
   };
@@ -1087,7 +1219,7 @@
     title: "Fire Drill",
     filters: { facility: "", year: "" },
     actions() {
-      return `<button class="secondary" data-act="excel">Download Excel</button>
+      return `<button class="secondary" data-act="excel">Download</button>
               <button data-act="add">+ Record fire drill</button>`;
     },
     async render(view) {
@@ -1171,7 +1303,7 @@
       });
       this.onAction = (act) => {
         if (act === "add") editDrill(null);
-        if (act === "excel") downloadDrillsExcel(drills).catch((ex) => toast(ex.message, true));
+        if (act === "excel") offerDownload(() => drillsSpec(drills, f), "the fire drill reports");
       };
     }
   };
@@ -1355,7 +1487,7 @@
     let d;
     try { d = await loadDrill(id); } catch (ex) { w.close(); toast(ex.message, true); return; }
     const box = (on) => (on ? "&#9746;" : "&#9744;");
-    const ymd = (v) => (v ? String(v).replace(/-/g, "/") : "");
+    const ymd = (v) => mdy(v);
     const parts = [...d.fire_drill_participants].sort((a, b) => a.name.localeCompare(b.name));
     const rows = parts.map((p) => p.name);
     while (rows.length < Math.max(20, parts.length + 4)) rows.push("");
@@ -1375,7 +1507,7 @@
       <div class="noprint"><button onclick="window.print()">Print</button></div>
       <h1>FIRE DRILL REPORT</h1>
       <div class="line">Name of Home: <span class="val">${esc(facilityName(d.facility_id))}</span></div>
-      <div class="line">Date of Drill (YYYY/MM/DD): <span class="val">${ymd(d.drill_date)}</span></div>
+      <div class="line">Date of Drill (MM/DD/YYYY): <span class="val">${ymd(d.drill_date)}</span></div>
       <div class="line">Start time (hh:mm): <span class="val sm">${hhmm(d.start_time)}</span>
         Completion Time (hh:mm): <span class="val sm">${hhmm(d.end_time)}</span>
         Total Time: <span class="val sm">${drillMinutes(d) == null ? "" : fmtMinutes(drillMinutes(d))}</span></div>
@@ -1391,7 +1523,7 @@
       <p><em>Following debrief session, staff participating must sign in the Page 2.</em></p>
       <div class="line">Fire Drill Coordinator: <span class="val">${esc(d.coordinator || "")}</span></div>
       <div class="line">Name of observer: <span class="val">${esc(d.observer_name || "")}</span></div>
-      <div class="line">Signature of observer: <span class="val"></span> Date (yyyy/mm/dd): <span class="val sm">${ymd(d.observer_date)}</span></div>
+      <div class="line">Signature of observer: <span class="val"></span> Date (MM/DD/YYYY): <span class="val sm">${ymd(d.observer_date)}</span></div>
       <div class="page2">
         <h1>PARTICIPANTS</h1>
         <table class="sign"><tr><th style="width:50%">PARTICIPANTS NAME</th><th>SIGNATURE</th></tr>
@@ -1401,29 +1533,6 @@
       <script>window.onload = function () { setTimeout(function () { window.print(); }, 300); };<\/script>
       </body></html>`);
     w.document.close();
-  }
-
-  async function downloadDrillsExcel(drills) {
-    toast("Preparing Excel file…");
-    const XLSX = await loadXLSX();
-    const ids = drills.map((d) => d.id);
-    const parts = [];
-    for (let i = 0; i < ids.length; i += 200)
-      parts.push(...check(await sb.from("fire_drill_participants").select("drill_id, name").in("drill_id", ids.slice(i, i + 200))));
-    const head = ["Date", "Home", "Type of event", "Activities", "Start", "Completion", "Total (min)",
-      ...DRILL_QUESTIONS.map((q) => q[1]), "Issues", "Problems / actions for improvement",
-      "Coordinator", "Observer", "Observer date", "Participants (count)", "Participants"];
-    const rows = [head];
-    for (const d of drills) {
-      const names = parts.filter((p) => p.drill_id === d.id).map((p) => p.name).sort();
-      rows.push([toDate(d.drill_date), facilityName(d.facility_id), DRILL_TYPE[d.event_type] || "", DRILL_ACTIVITY[d.activity] || "",
-        hhmm(d.start_time), hhmm(d.end_time), drillMinutes(d) ?? "",
-        ...DRILL_QUESTIONS.map(([k]) => ANSWER[d[k]] || ""), drillIssues(d), d.problems || "",
-        d.coordinator || "", d.observer_name || "", toDate(d.observer_date), names.length, names.join(", ")]);
-    }
-    const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, sheetFrom(XLSX, rows, [12, 28, 20, 30, 8, 11, 10, ...DRILL_QUESTIONS.map(() => 16), 8, 40, 20, 20, 12, 12, 60]), "Fire drills");
-    XLSX.writeFile(wb, `TrainWell-fire-drills-${todayISO()}.xlsx`);
   }
 
   // -------------------------------------------------------- courses
@@ -1609,7 +1718,7 @@
         </div>
 
         <div class="card">
-          <div class="card-head"><h2>Results</h2>${atts.length ? `<button class="secondary small" data-xls>Download Excel</button>` : ""}</div>
+          <div class="card-head"><h2>Results</h2>${atts.length ? `<button class="secondary small" data-xls>Download</button>` : ""}</div>
           <p class="muted" style="margin-top:0">${atts.length ? `${passedPeople.size} of ${people.size} staff who took the quiz have passed · ${atts.length} attempt${atts.length > 1 ? "s" : ""} in total` : "No one has taken this quiz yet."}</p>
           ${atts.length ? `<div class="table-wrap"><table>
             <thead><tr><th>Date</th><th>Employee</th><th>Home</th><th>Score</th><th>Result</th></tr></thead>
@@ -1629,10 +1738,13 @@
         catch (ex) { if (w) w.close(); toast(ex.message, true); }
       });
       $$("[data-emp]", view).forEach((b) => b.onclick = () => showEmployee(Number(b.dataset.emp)));
-      $("[data-xls]", view)?.addEventListener("click", () => downloadXLSX(`TrainWell-${c.title.replace(/[^\w]+/g, "-")}-quiz-results-${todayISO()}.xlsx`, "Quiz results", [
-        ["Date", "Employee", "Home", "Score %", "Correct", "Questions", "Result"],
-        ...atts.map((a) => [toDate(a.created_at.slice(0, 10)), fullName(a.employees), facilityName(a.employees?.facility_id), Number(a.score), a.correct, a.total, a.passed ? "Passed" : "Not passed"])
-      ]).catch((ex) => toast(ex.message, true)));
+      $("[data-xls]", view)?.addEventListener("click", () => offerDownload(async () => ({
+        file: `TrainWell-${safeName(c.title)}-quiz-results-${todayISO()}`, title: `Quiz results: ${c.title}`,
+        subtitle: filterLine([`Pass mark ${c.pass_mark ?? 80}%`, `${atts.length} attempts`]),
+        columns: [{ h: "Date", w: 12, date: true }, { h: "Employee", w: 26 }, { h: "Home", w: 24 }, { h: "Score %", w: 9 }, { h: "Correct", w: 9 }, { h: "Questions", w: 10 }, { h: "Result", w: 12 }],
+        rows: atts.map((a) => [{ v: a.created_at, date: true }, fullName(a.employees), facilityName(a.employees?.facility_id), Number(a.score), a.correct, a.total,
+          { v: a.passed ? "Passed" : "Not passed", st: a.passed ? "valid" : "expired" }])
+      }), "these quiz results"));
       if (admin) {
         $("[data-addmat]", view).onclick = () => editMaterial(c, null, mats);
         $$("[data-editmat]", view).forEach((b) => b.onclick = () => editMaterial(c, mats.find((x) => x.id === Number(b.dataset.editmat)), mats));
@@ -2046,7 +2158,7 @@
   views.compliance = {
     title: "Compliance", navAs: "compliance",
     filters: { facility: "", course: "", status: "", month: "", q: "" },
-    actions() { return `<button class="secondary" data-act="excel">Download Excel</button>`; },
+    actions() { return `<button class="secondary" data-act="excel">Download</button>`; },
     async render(view) {
       const f = this.filters;
       if (!isAdmin()) f.facility = "";
@@ -2156,7 +2268,7 @@
                 <td>${i.expires_on ? `${fmtDate(i.expires_on)} <span class="muted">(${d < 0 ? `${-d} days ago` : d === 0 ? "today" : `in ${d} days`})</span>` : "—"}</td>
                 <td class="actions"><span class="muted small-arrow">Open →</span></td></tr>`; }).join("")
               || `<tr><td colspan="6" class="empty">${f.status || f.month ? "No one in this group." : "Everyone is up to date. 🎉"}</td></tr>`}
-              ${list.length > 300 ? `<tr><td colspan="6" class="empty">Showing the first 300. Download Excel for the full list.</td></tr>` : ""}
+              ${list.length > 300 ? `<tr><td colspan="6" class="empty">Showing the first 300. Use Download for the full list.</td></tr>` : ""}
             </tbody></table></div>
         </div>`}`;
 
@@ -2176,10 +2288,14 @@
       $$("[data-month]", view).forEach((b) => b.addEventListener("click", () => { f.month = f.month === b.dataset.month ? "" : b.dataset.month; f.status = ""; vizTip().classList.add("hidden"); route().then(focusList); }));
       wireTips(view); wireLinks(view);
       this.onAction = (act) => {
-        if (act === "excel") downloadXLSX(`TrainWell-compliance-${todayISO()}.xlsx`, "Compliance", [
-          ["Employee", "Home", "Course", "Status", "Expires", "Last completed"],
-          ...list.map((i) => [fullName(i.employee), facilityName(i.employee.facility_id), i.course.title, ST_LABEL[i.status], toDate(i.expires_on), toDate(i.completed_on)])
-        ]).catch((ex) => toast(ex.message, true));
+        if (act === "excel") offerDownload(async () => ({
+          file: `TrainWell-compliance-${todayISO()}`, title: `Compliance: ${listTitle}`,
+          subtitle: filterLine([f.facility ? facilityName(Number(f.facility)) : (isAdmin() ? "All homes" : facilityName(state.me.facility_id)),
+            f.course ? courseTitle(Number(f.course)) : "All mandatory courses", f.q ? `Search: "${f.q}"` : "", `${list.length} rows`]),
+          columns: [{ h: "Employee", w: 26 }, { h: "Home", w: 24 }, { h: "Course", w: 28 }, { h: "Status", w: 16 }, { h: "Expires", w: 12, date: true }, { h: "Last completed", w: 14, date: true }],
+          rows: list.map((i) => [fullName(i.employee), facilityName(i.employee.facility_id), i.course.title, { v: ST_LABEL[i.status], st: i.status },
+            i.expires_on ? { v: i.expires_on, st: i.status } : "", i.completed_on || ""])
+        }), "this compliance list");
       };
     }
   };
