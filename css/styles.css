@@ -497,3 +497,15 @@ tr.row-link:hover .small-arrow { color: var(--brand); }
   .cols-chart { height: 180px; gap: .1rem; }
   .col-lbl { font-size: .62rem; }
 }
+
+/* ---------- Download chooser ---------- */
+.dl-choices { display: grid; grid-template-columns: 1fr 1fr; gap: .8rem; }
+.dl-choice { display: grid; gap: .25rem; justify-items: start; text-align: left; padding: 1rem 1.1rem; border-radius: 10px;
+  background: var(--surface); color: var(--text); border: 1.5px solid var(--border); font-weight: 400; }
+.dl-choice:hover:not(:disabled) { background: var(--brand-soft); border-color: var(--brand); }
+.dl-choice strong { font-size: 1.05rem; color: var(--brand-dark); }
+.dl-choice span { font-size: .82rem; color: var(--muted); }
+.dl-choice.is-busy { border-color: var(--brand); }
+.dl-choice.is-busy span::after { content: " · preparing…"; color: var(--brand); }
+.dl-choice:disabled { cursor: progress; opacity: .75; }
+@media (max-width: 480px) { .dl-choices { grid-template-columns: 1fr; } }
