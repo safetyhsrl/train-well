@@ -22,6 +22,15 @@ function envKey(classic: string, modern: string): string {
   catch { return raw; }
 }
 
+// Admins must have finished two-step sign-in ("aal2" in their login token)
+function tokenAal(token: string): string {
+  try {
+    let b = token.split(".")[1].replace(/-/g, "+").replace(/_/g, "/");
+    while (b.length % 4) b += "=";
+    return String(JSON.parse(atob(b)).aal ?? "");
+  } catch { return ""; }
+}
+
 const json = (body: unknown, status = 200) =>
   new Response(JSON.stringify(body), { status, headers: { ...cors, "Content-Type": "application/json" } });
 
@@ -37,6 +46,7 @@ Deno.serve(async (req) => {
   const token = (req.headers.get("Authorization") ?? "").replace(/^Bearer\s+/i, "");
   const { data: { user }, error: userErr } = await admin.auth.getUser(token);
   if (userErr || !user) return json({ error: "Not signed in." }, 401);
+  if (tokenAal(token) !== "aal2") return json({ error: "Finish two-step sign-in first: sign out, sign back in and enter your authenticator code." }, 403);
 
   const { data: me } = await admin.from("profiles").select("role, active").eq("id", user.id).maybeSingle();
   if (!me || me.role !== "admin" || !me.active) return json({ error: "Only administrators can add users." }, 403);
@@ -52,7 +62,7 @@ Deno.serve(async (req) => {
 
   if (!full_name) return json({ error: "Full name is required." }, 400);
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return json({ error: "A valid email is required." }, 400);
-  if (password.length < 8) return json({ error: "Password must be at least 8 characters." }, 400);
+  if (password.length < 10 || !/[A-Za-z]/.test(password) || !/[0-9]/.test(password)) return json({ error: "Passwords need at least 10 characters, with letters and numbers." }, 400);
   if (role === "manager" && !facility_id) return json({ error: "Managers need a facility." }, 400);
 
   // 3. Create the login, then the profile
