@@ -24,14 +24,14 @@
     const d = new Date(); d.setDate(d.getDate() + n); d.setMinutes(d.getMinutes() - d.getTimezoneOffset());
     return d.toISOString().slice(0, 10);
   };
-  // All dates are shown as MM/DD/YYYY
+  // All dates are shown as MM/DD/YY
   const pad2 = (n) => String(n).padStart(2, "0");
   const mdy = (v) => {
     if (!v) return "";
     const s = String(v);
-    if (/^\d{4}-\d{2}-\d{2}$/.test(s)) { const [y, m, d] = s.split("-"); return `${m}/${d}/${y}`; }
+    if (/^\d{4}-\d{2}-\d{2}$/.test(s)) { const [y, m, d] = s.split("-"); return `${m}/${d}/${y.slice(-2)}`; }
     const d = new Date(s);
-    return isNaN(d) ? s : `${pad2(d.getMonth() + 1)}/${pad2(d.getDate())}/${d.getFullYear()}`;
+    return isNaN(d) ? s : `${pad2(d.getMonth() + 1)}/${pad2(d.getDate())}/${String(d.getFullYear()).slice(-2)}`;
   };
   const fmtDate = (v) => (v ? mdy(v) : "—");
   const fmtDateTime = (v) => {
@@ -158,7 +158,7 @@
       }));
       r.forEach((c, i) => {
         const x = cellOf(c), cell = row.getCell(i + 1);
-        if (cell.value instanceof Date) cell.numFmt = "mm/dd/yyyy";
+        if (cell.value instanceof Date) cell.numFmt = "mm/dd/yy";
         if (x.st && ST_FILL[x.st]) { cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF" + ST_FILL[x.st] } }; cell.font = { color: { argb: "FF" + ST_INK[x.st] } }; }
         if (x.bold) cell.font = { ...(cell.font || {}), bold: true };
       });
@@ -1507,7 +1507,7 @@
       <div class="noprint"><button onclick="window.print()">Print</button></div>
       <h1>FIRE DRILL REPORT</h1>
       <div class="line">Name of Home: <span class="val">${esc(facilityName(d.facility_id))}</span></div>
-      <div class="line">Date of Drill (MM/DD/YYYY): <span class="val">${ymd(d.drill_date)}</span></div>
+      <div class="line">Date of Drill (MM/DD/YY): <span class="val">${ymd(d.drill_date)}</span></div>
       <div class="line">Start time (hh:mm): <span class="val sm">${hhmm(d.start_time)}</span>
         Completion Time (hh:mm): <span class="val sm">${hhmm(d.end_time)}</span>
         Total Time: <span class="val sm">${drillMinutes(d) == null ? "" : fmtMinutes(drillMinutes(d))}</span></div>
@@ -1523,7 +1523,7 @@
       <p><em>Following debrief session, staff participating must sign in the Page 2.</em></p>
       <div class="line">Fire Drill Coordinator: <span class="val">${esc(d.coordinator || "")}</span></div>
       <div class="line">Name of observer: <span class="val">${esc(d.observer_name || "")}</span></div>
-      <div class="line">Signature of observer: <span class="val"></span> Date (MM/DD/YYYY): <span class="val sm">${ymd(d.observer_date)}</span></div>
+      <div class="line">Signature of observer: <span class="val"></span> Date (MM/DD/YY): <span class="val sm">${ymd(d.observer_date)}</span></div>
       <div class="page2">
         <h1>PARTICIPANTS</h1>
         <table class="sign"><tr><th style="width:50%">PARTICIPANTS NAME</th><th>SIGNATURE</th></tr>
