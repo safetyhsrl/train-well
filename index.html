@@ -11,7 +11,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Figtree:wght@400;500;600;700&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="css/styles.css?v=20261023a">
+  <link rel="stylesheet" href="css/styles.css?v=20261023b">
 </head>
 <body class="auth-page">
   <main class="auth">
@@ -72,6 +72,8 @@
             <input type="checkbox" id="remember"> Remember my email on this device
           </label>
 
+          <div id="captcha" class="captcha hidden"></div>
+
           <button type="submit" id="loginBtn" class="btn-primary">
             <span class="btn-label">Sign in</span><span class="spinner" aria-hidden="true"></span>
           </button>
@@ -89,29 +91,76 @@
           <div class="field">
             <label for="newPassword">New password</label>
             <div class="pw-wrap">
-              <input id="newPassword" type="password" minlength="8" required autocomplete="new-password" aria-describedby="pwRule">
+              <input id="newPassword" type="password" minlength="10" required autocomplete="new-password" aria-describedby="pwRule">
               <button type="button" class="pw-toggle" data-toggle="newPassword" aria-label="Show password" aria-pressed="false">Show</button>
             </div>
-            <p class="field-hint" id="pwRule">At least 8 characters.</p>
+            <p class="field-hint" id="pwRule">At least 10 characters, with letters and numbers.</p>
             <p class="caps-hint hidden" data-caps="newPassword">Caps Lock is on</p>
           </div>
 
           <div class="field">
             <label for="confirmPassword">Confirm password</label>
-            <input id="confirmPassword" type="password" minlength="8" required autocomplete="new-password">
+            <input id="confirmPassword" type="password" minlength="10" required autocomplete="new-password">
           </div>
 
           <button type="submit" id="resetBtn" class="btn-primary">
             <span class="btn-label">Save password and sign in</span><span class="spinner" aria-hidden="true"></span>
           </button>
         </form>
+
+        <!-- Two-step sign-in: first-time setup (admins and managers) -->
+        <form id="mfaSetupForm" class="hidden" novalidate>
+          <h1>Set up two-step sign-in</h1>
+          <p class="auth-sub">Admins and managers enter a code from their phone each time they sign in, so a stolen password isn't enough to get in.</p>
+
+          <div id="mfaSetupMsg" class="alert hidden" role="alert"></div>
+
+          <ol class="mfa-steps">
+            <li>Install <strong>Google Authenticator</strong> or <strong>Microsoft Authenticator</strong> on your phone.</li>
+            <li>In the app, tap <strong>+</strong> and scan this code.
+              <div class="mfa-qr" id="mfaQr" aria-label="QR code for your authenticator app"></div>
+              <details class="mfa-key"><summary>Can't scan it?</summary>
+                <p>Choose “Enter a setup key” in the app and type this key:</p>
+                <code id="mfaSecret"></code></details></li>
+            <li>Type the 6-digit code the app shows for Train Well.</li>
+          </ol>
+
+          <div class="field">
+            <label for="mfaSetupCode">6-digit code</label>
+            <input id="mfaSetupCode" class="code-input" type="text" inputmode="numeric" autocomplete="one-time-code" maxlength="6" pattern="[0-9]{6}" required>
+          </div>
+
+          <button type="submit" id="mfaSetupBtn" class="btn-primary">
+            <span class="btn-label">Turn on and continue</span><span class="spinner" aria-hidden="true"></span>
+          </button>
+          <p class="auth-foot"><button type="button" class="link" data-signout>Sign out</button></p>
+        </form>
+
+        <!-- Two-step sign-in: enter the code -->
+        <form id="mfaCodeForm" class="hidden" novalidate>
+          <h1>Enter your code</h1>
+          <p class="auth-sub">Open your authenticator app and type the 6-digit code for Train Well.</p>
+
+          <div id="mfaCodeMsg" class="alert hidden" role="alert"></div>
+
+          <div class="field">
+            <label for="mfaCode">6-digit code</label>
+            <input id="mfaCode" class="code-input" type="text" inputmode="numeric" autocomplete="one-time-code" maxlength="6" pattern="[0-9]{6}" required>
+          </div>
+
+          <button type="submit" id="mfaCodeBtn" class="btn-primary">
+            <span class="btn-label">Verify and sign in</span><span class="spinner" aria-hidden="true"></span>
+          </button>
+          <p class="auth-foot">Lost your phone? Ask an administrator to reset your two-step sign-in.<br>
+            <button type="button" class="link" data-signout>Sign out</button></p>
+        </form>
       </div>
     </section>
   </main>
 
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
-  <script src="js/config.js?v=20261023a"></script>
-  <script src="js/client.js?v=20261023a"></script>
-  <script src="js/auth.js?v=20261023a"></script>
+  <script src="js/config.js?v=20261023b"></script>
+  <script src="js/client.js?v=20261023b"></script>
+  <script src="js/auth.js?v=20261023b"></script>
 </body>
 </html>
