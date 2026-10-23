@@ -2307,14 +2307,20 @@
     actions() { return `<button data-act="add">+ Add user</button>`; },
     async render(view) {
       const f = this.filters;
-      const all = check(await sb.from("profiles").select("*").order("full_name"));
+      const [profRes, mfaRes] = await Promise.all([sb.from("profiles").select("*").order("full_name"), sb.rpc("mfa_status")]);
+      const all = check(profRes), mfaRows = mfaRes.data || [];
+      const mfaOn = new Map(mfaRows.map((r) => [r.user_id, r.since]));
       const users = all.filter((u) => !f.role || u.role === f.role);
+      const twoStep = (u) => u.role === "employee" ? '<span class="muted">Not needed</span>'
+        : mfaOn.has(u.id) ? `${badge("active", "On")}${u.id === state.me.id ? "" : ` <button class="link small" data-mfareset="${u.id}">Reset</button>`}`
+        : `${badge("inactive", "Not set up")}`;
       const count = (r) => all.filter((u) => u.role === r).length;
       view.innerHTML = `
         <div class="card">
           <p class="muted" style="margin-top:0"><strong>Admins</strong> see and manage everything.
             <strong>Managers</strong> see only their own facility's employees, sessions and records.
-            <strong>Employees</strong> see only their own training, certificates, sessions and fire drills.</p>
+            <strong>Employees</strong> see only their own training, certificates, sessions and fire drills.
+            Admins and managers set up <strong>two-step sign-in</strong> (a code from a phone app) the first time they sign in.</p>
           <div class="toolbar">
             <select data-f="role">
               <option value="">All roles (${all.length})</option>
@@ -2324,15 +2330,16 @@
             </select>
           </div>
           <div class="table-wrap"><table>
-            <thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Facility</th><th>Status</th><th></th></tr></thead>
+            <thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Facility</th><th>Status</th><th>Two-step sign-in</th><th></th></tr></thead>
             <tbody>${users.map((u) => `<tr>
               <td>${esc(u.full_name)}${u.id === state.me.id ? ' <span class="muted">(you)</span>' : ""}</td><td>${esc(u.email)}</td>
               <td>${badge(u.role)}</td><td>${u.role === "admin" ? "All" : esc(facilityName(u.facility_id))}</td>
               <td>${badge(u.active ? "active" : "inactive")}</td>
+              <td class="nowrap">${twoStep(u)}</td>
               <td class="actions"><button class="link small" data-reset="${u.id}">Send password reset</button>
                 <button class="link small" data-edit="${u.id}">Edit</button>
                 ${u.id === state.me.id ? "" : delBtn(u.id)}</td></tr>`).join("")
-              || `<tr><td colspan="6" class="empty">No users with this role yet.</td></tr>`}
+              || `<tr><td colspan="7" class="empty">No users with this role yet.</td></tr>`}
             </tbody></table></div>
         </div>`;
       $$("[data-f]", view).forEach((inp) => inp.addEventListener("input", () => { f[inp.dataset.f] = inp.value; route(); }));
@@ -2347,8 +2354,18 @@
       $$("[data-reset]", view).forEach((b) => b.onclick = async () => {
         const u = users.find((x) => x.id === b.dataset.reset);
         const redirectTo = location.href.split(/[?#]/)[0].replace(/[^/]*$/, "") + "index.html?setpw=1";
-        const { error } = await sb.auth.resetPasswordForEmail(u.email, { redirectTo });
+        let captchaToken;
+        try { captchaToken = await getCaptchaToken(); } catch (ex) { toast(ex.message, true); return; }
+        const { error } = await sb.auth.resetPasswordForEmail(u.email, { redirectTo, captchaToken });
         toast(error ? error.message : `Reset email sent to ${u.email}`, !!error);
+      });
+      $$("[data-mfareset]", view).forEach((b) => b.onclick = async () => {
+        const u = users.find((x) => x.id === b.dataset.mfareset);
+        if (!(await confirmBox(`Reset two-step sign-in for ${u.full_name}? Use this if they lost or replaced their phone. ` +
+          `They'll be signed out everywhere and will scan a new QR code the next time they sign in.`, { okText: "Reset two-step sign-in" }))) return;
+        const { error } = await sb.rpc("reset_mfa", { p_user: u.id });
+        toast(error ? error.message : `Two-step sign-in reset for ${u.full_name}`, !!error);
+        if (!error) route();
       });
       this.onAction = (act) => { if (act === "add") addUser(); };
     }
@@ -2368,9 +2385,15 @@
   }
   function genPassword() {
     const chars = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789!@#$%";
-    const a = new Uint32Array(14); crypto.getRandomValues(a);
-    return Array.from(a, (n) => chars[n % chars.length]).join("");
+    for (;;) {
+      const a = new Uint32Array(14); crypto.getRandomValues(a);
+      const pw = Array.from(a, (n) => chars[n % chars.length]).join("");
+      if (!pwProblem(pw)) return pw;
+    }
   }
+  // Same rule as the Supabase setting: 10+ characters with letters and numbers
+  const pwProblem = (pw) => (pw || "").length < 10 ? "Passwords need at least 10 characters."
+    : !/[A-Za-z]/.test(pw) || !/[0-9]/.test(pw) ? "Passwords need both letters and numbers." : "";
 
   async function addUser() {
     const pw = genPassword();
@@ -2404,7 +2427,7 @@
             </div></div>
         </div>
         <div class="field" data-pw><label>Temporary password *</label>
-          <div style="display:flex;gap:.5rem"><input name="password" minlength="8" value="${esc(pw)}">
+          <div style="display:flex;gap:.5rem"><input name="password" minlength="10" value="${esc(pw)}">
           <button type="button" class="secondary" data-copy>Copy</button></div>
           <p class="muted" style="font-size:.85rem;margin:.3rem 0 0">Give this to the user privately. They can change it with “Forgot password?” on the sign-in page.</p></div>`,
       async onSubmit(d) {
@@ -2412,11 +2435,12 @@
         if (d.role === "employee") {
           if (!d.employee_id) throw new Error("Choose which employee this login is for.");
           const redirect_to = location.href.split(/[?#]/)[0].replace(/[^/]*$/, "") + "index.html?setpw=1";
+          if (d.mode === "password" && pwProblem(d.password)) throw new Error(pwProblem(d.password));
           await invokeFn("employee-access", { action: d.mode, employee_id: Number(d.employee_id), email, password: d.password, redirect_to });
           toast(d.mode === "invite" ? `Invite sent to ${email}` : `Login created for ${email}`);
         } else {
           if (!d.full_name.trim()) throw new Error("Full name is required.");
-          if ((d.password || "").length < 8) throw new Error("Password must be at least 8 characters.");
+          if (pwProblem(d.password)) throw new Error(pwProblem(d.password));
           await invokeFn("create-user", { full_name: d.full_name.trim(), email, password: d.password,
             role: d.role, facility_id: d.role === "admin" ? null : Number(d.facility_id) });
           toast(`User ${email} created`);
@@ -2481,6 +2505,71 @@
   }
 
   // -------------------------------------------------------- facilities (admin)
+  // -------------------------------------------------------- sign-in history (admin)
+  const deviceOf = (ua) => {
+    if (!ua) return "—";
+    const browser = /Edg\//.test(ua) ? "Edge" : /OPR\/|Opera/.test(ua) ? "Opera" : /Firefox\//.test(ua) ? "Firefox"
+      : /Chrome\//.test(ua) ? "Chrome" : /Safari\//.test(ua) ? "Safari" : "";
+    const os = /iPhone/.test(ua) ? "iPhone" : /iPad/.test(ua) ? "iPad" : /Android/.test(ua) ? "Android"
+      : /Windows/.test(ua) ? "Windows" : /Mac OS X|Macintosh/.test(ua) ? "Mac" : /CrOS/.test(ua) ? "Chromebook" : /Linux/.test(ua) ? "Linux" : "";
+    return [browser, os].filter(Boolean).join(" on ") || ua.slice(0, 40);
+  };
+  const SIGNIN_EVENT = { signed_in: "Signed in (password)", two_step: "Entered two-step code", mfa_reset: "Two-step sign-in reset" };
+  views.signins = {
+    title: "Sign-in history", adminOnly: true, navAs: "signins",
+    filters: { days: "30", who: "", event: "" },
+    actions() { return `<button class="secondary" data-act="excel">Download</button>`; },
+    async render(view) {
+      const f = this.filters;
+      const { data, error } = await sb.rpc("sign_in_history", { p_days: Number(f.days) });
+      if (error) throw error;
+      const people = [...new Map(data.filter((r) => r.email).map((r) => [r.email, r.full_name || r.email])).entries()]
+        .sort((a, b) => a[1].localeCompare(b[1]));
+      const rows = data.filter((r) => (!f.who || r.email === f.who) && (!f.event || r.event === f.event));
+      const newDevice = new Set();   // first time a person shows up from a device/IP in this window
+      const seen = new Set();
+      [...rows].reverse().forEach((r, i) => { const k = `${r.email}|${deviceOf(r.user_agent)}|${r.ip}`; if (!seen.has(k)) { seen.add(k); newDevice.add(r); } });
+      view.innerHTML = `
+        <div class="card">
+          <p class="muted" style="margin-top:0">Every sign-in is recorded by the database, with the device and internet address it came from.
+            Look for sign-ins you don't recognise, such as someone signing in at odd hours or from an unfamiliar device. Kept for 12 months.</p>
+          <div class="toolbar">
+            <select data-f="days">
+              ${[["1", "Last 24 hours"], ["7", "Last 7 days"], ["30", "Last 30 days"], ["90", "Last 90 days"], ["365", "Last 12 months"]]
+                .map(([v, t]) => `<option value="${v}" ${f.days === v ? "selected" : ""}>${t}</option>`).join("")}
+            </select>
+            <select data-f="who"><option value="">Everyone</option>
+              ${people.map(([e, n]) => `<option value="${esc(e)}" ${f.who === e ? "selected" : ""}>${esc(n)}</option>`).join("")}</select>
+            <select data-f="event"><option value="">All activity</option>
+              ${Object.entries(SIGNIN_EVENT).map(([k, t]) => `<option value="${k}" ${f.event === k ? "selected" : ""}>${t}</option>`).join("")}</select>
+            <span class="muted">${rows.length} ${rows.length === 1 ? "entry" : "entries"}</span>
+          </div>
+          <div class="table-wrap"><table>
+            <thead><tr><th>When</th><th>Person</th><th>Role</th><th>What happened</th><th>Device</th><th>Internet address</th></tr></thead>
+            <tbody>${rows.map((r) => `<tr>
+              <td class="nowrap">${fmtDateTime(r.at)}</td>
+              <td>${esc(r.full_name || r.email || "Deleted user")}${r.full_name ? `<br><span class="muted" style="font-size:.82rem">${esc(r.email)}</span>` : ""}</td>
+              <td>${r.role ? badge(r.role) : "—"}</td>
+              <td>${esc(SIGNIN_EVENT[r.event] || r.event)}${r.detail ? `<br><span class="muted" style="font-size:.82rem">${esc(r.detail)}</span>` : ""}</td>
+              <td title="${esc(r.user_agent || "")}">${esc(deviceOf(r.user_agent))}${newDevice.has(r) && r.event === "signed_in" ? ' <span class="badge expiring">First time here</span>' : ""}</td>
+              <td class="nowrap">${esc(r.ip || "—")}</td></tr>`).join("")
+              || `<tr><td colspan="6" class="empty">No sign-ins in this period.</td></tr>`}</tbody></table></div>
+        </div>`;
+      $$("[data-f]", view).forEach((inp) => inp.addEventListener("input", () => { f[inp.dataset.f] = inp.value; route(); }));
+      this.onAction = (act) => {
+        if (act === "excel") offerDownload(async () => ({
+          file: `Sign-in-history-${todayISO()}`, title: "Sign-in history",
+          subtitle: filterLine([{ "1": "Last 24 hours", "7": "Last 7 days", "30": "Last 30 days", "90": "Last 90 days", "365": "Last 12 months" }[f.days],
+            f.who ? (people.find((p) => p[0] === f.who) || [])[1] : "Everyone", f.event ? SIGNIN_EVENT[f.event] : ""]),
+          columns: [{ h: "When", w: 20 }, { h: "Person", w: 24 }, { h: "Email", w: 30 }, { h: "Role", w: 11 },
+            { h: "What happened", w: 24 }, { h: "Device", w: 22 }, { h: "Internet address", w: 18 }],
+          rows: rows.map((r) => [fmtDateTime(r.at), r.full_name || "Deleted user", r.email || "", r.role || "",
+            (SIGNIN_EVENT[r.event] || r.event) + (r.detail ? ` (${r.detail})` : ""), deviceOf(r.user_agent), r.ip || ""])
+        }), "the sign-in history");
+      };
+    }
+  };
+
   views.facilities = {
     title: "Facilities", adminOnly: true,
     actions() { return `<button data-act="add">+ Add facility</button>`; },
@@ -2774,12 +2863,13 @@
             <label class="choice"><input type="radio" name="mode" value="password"> Set a temporary password now (no email is sent)</label>
           </div></div>
         <div class="field hidden" data-pw><label>Temporary password</label>
-          <div style="display:flex;gap:.5rem"><input name="password" minlength="8" value="${esc(genPassword())}">
+          <div style="display:flex;gap:.5rem"><input name="password" minlength="10" value="${esc(genPassword())}">
           <button type="button" class="secondary" data-copy>Copy</button></div>
           <p class="muted" style="font-size:.85rem;margin:.3rem 0 0">Give it to them privately. They can change it any time with “Forgot password?” on the sign-in page.</p></div>
         <p class="muted" style="font-size:.85rem;margin:0">They'll sign in at the same address as you, and will only see their own training, certificates, sessions and fire drills.</p>`,
       async onSubmit(d) {
         const redirect_to = location.href.split(/[?#]/)[0].replace(/[^/]*$/, "") + "index.html?setpw=1";
+        if (d.mode === "password" && pwProblem(d.password)) throw new Error(pwProblem(d.password));
         await invokeFn("employee-access", { action: d.mode, employee_id: e.id, email: d.email.trim(), password: d.password, redirect_to });
         toast(d.mode === "invite" ? `Invite sent to ${d.email.trim()}` : `Login created for ${fullName(e)}`);
         route();
@@ -2943,6 +3033,10 @@
     if (!data.session) { location.replace("index.html"); return; }
     const { data: me } = await sb.from("profiles").select("*").eq("id", data.session.user.id).maybeSingle();
     if (!me || !me.active) { await sb.auth.signOut(); location.replace("index.html"); return; }
+    if (me.role !== "employee") {
+      const { data: aal } = await sb.auth.mfa.getAuthenticatorAssuranceLevel();
+      if (!aal || aal.currentLevel !== "aal2") { location.replace("index.html"); return; }
+    }
     state.me = me;
     sb.auth.onAuthStateChange((event) => { if (event === "SIGNED_OUT") location.replace("index.html"); });
     await loadLookups();
