@@ -14,9 +14,11 @@ certification expiry, sessions and attendance — behind a secure manager login.
 |---|---|
 | **Sign in** | Email + password login. Forgot-password emails. Inactive accounts are blocked. |
 | **Dashboard** | Compliance % for mandatory training, expiring (next 30 days), expired and never-completed counts, compliance by facility, who needs attention, upcoming sessions. |
-| **Employees** | Add, edit, search and filter ~200+ employees. Import/export CSV. Click a name to see their full training history and mandatory-training status. |
+| **Employees** | Add, edit, search and filter ~200+ employees. Import CSV, download Excel. Click a name to see their full training history and mandatory-training status. |
 | **Training records** | Record completions for one or many employees at once. Expiry dates fill in automatically from the course's validity period. Filter by course/status/facility, export CSV. |
 | **Sessions & attendance** | Schedule classes per facility, book employees, mark attendance. Marking someone *Attended* creates their training record automatically. |
+| **Fire Drill** | Record fire drills and real fire alarms for each home, based on the paper Fire Drill Report: times, type, activities, the 8 Yes/No/N/A outcome questions, problems/improvements, coordinator, observer and participants. Print a copy laid out like the paper form with a sign-in sheet, or download all drills to Excel. The Dashboard shows the last drill for each home. |
+| **Employee logins** | Admins give any employee their own login (Employees → open a person → **Give login**): an email invite to set their own password, or a temporary password. Employees see only **My training** (status, expiry dates, courses still to complete), **My certificates**, **My sessions** and **My fire drills**, and can **upload certificates** (PDF or phone photo) which update their record straight away. Managers can view every uploaded file from Training records. |
 | **Courses** | Course catalogue with category, hours, validity period and a *mandatory* flag. |
 | **Users** *(admin)* | Add new manager/admin logins, assign them to a facility, deactivate them, send password resets. |
 | **Facilities** *(admin)* | Rename the 3 starter facilities, add addresses, add more facilities later. |
@@ -49,18 +51,21 @@ so a manager can't see another facility's data even by poking at the browser.
 2. In this repo, edit [`js/config.js`](js/config.js) and paste them in. Commit the change.
    > The anon key is meant to be public. **Never** paste the `service_role` key anywhere in this repo.
 
-### 4. Deploy the "add user" function
-The **Add user** button needs a small server function (it uses a secret key that must not be in the browser).
+### 4. Deploy the "add user" and "delete user" functions
+The **Add user** and user **Delete** buttons need two small server functions (they use a secret key that must not be in the browser).
 
 **Easiest — from the dashboard:** Supabase → **Edge Functions → Deploy a new function → Via Editor**. Name it
 exactly `create-user`, paste the contents of
 [`supabase/functions/create-user/index.ts`](supabase/functions/create-user/index.ts), and click **Deploy**.
+Do the same again with the name `delete-user` and
+[`supabase/functions/delete-user/index.ts`](supabase/functions/delete-user/index.ts).
 
 **Or with the CLI:**
 ```bash
 npx supabase login
 npx supabase link --project-ref YOUR-PROJECT-ID
 npx supabase functions deploy create-user
+npx supabase functions deploy delete-user
 ```
 
 ### 5. Publish on GitHub Pages
@@ -90,6 +95,13 @@ npx supabase functions deploy create-user
 - **Monthly check:** the Dashboard's *Needs attention* list, or Training records filtered to *Expiring*/*Expired*,
   then **Export CSV**.
 
+## Deleting things
+Every list has a red **Delete** on each row (you confirm before anything is removed). Deleting an employee or course also deletes its training records, so for people
+who leave, setting them **Inactive** keeps their history. Deleting a facility moves its people to another facility first.
+
+*Already set up before October 2026?* Run [`supabase/update-2026-10-employee-logins.sql`](supabase/update-2026-10-employee-logins.sql) and deploy the `employee-access` function for employee logins, run [`supabase/update-2026-10-fire-drills.sql`](supabase/update-2026-10-fire-drills.sql) once for Fire Drill, and [`supabase/update-2026-10-delete.sql`](supabase/update-2026-10-delete.sql)
+once in the SQL Editor and deploy the `delete-user` function (step 4).
+
 ## Files
 
 ```
@@ -103,16 +115,31 @@ js/app.js                  All app pages
 supabase/schema.sql        Database tables, security rules, starter data
 supabase/first-admin.sql   Makes your first admin
 supabase/functions/create-user/index.ts   Server function for "Add user"
+supabase/functions/delete-user/index.ts   Server function for deleting users
+supabase/update-2026-10-*.sql             One-time updates for existing databases (run in date order)
 sample-data/employees-template.csv        CSV import template
 ```
 
 ## Security notes
-- Data access rules live in the database (Row Level Security) — admins see all, managers only their facility.
-- Public sign-up is disabled; only admins create accounts.
-- Deactivated users are blocked from the app immediately.
-- Supabase handles password hashing, sessions and reset emails.
-- Supabase free projects pause after a week with no activity; upgrade to Pro (~US$25/mo) for daily-use production
-  and automatic backups.
+- Data access rules live in the database (Row Level Security): admins see all, managers only their facility,
+  employees only their own records.
+- **Two-step sign-in:** admins and managers must enter a code from an authenticator app (Google or Microsoft
+  Authenticator) after their password. The database itself refuses their requests until they have, so a
+  stolen password alone gets nothing. Employees sign in with a password only.
+  Set up with `supabase/update-2026-10-security.sql`.
+- **Lost phone:** another admin opens Users and chooses **Reset** in the Two-step sign-in column.
+  If the only admin is locked out, run this in the Supabase SQL Editor, then sign in and scan a new code:
+  `delete from auth.mfa_factors where user_id = (select id from auth.users where email = 'you@example.com');`
+- **Passwords:** at least 10 characters with letters and numbers (Supabase: Authentication -> Sign In / Providers
+  -> Email). On the Pro plan, also turn on "Prevent use of leaked passwords".
+- **Sign-in history:** every sign-in is recorded by the database (time, device, internet address) and kept 12 months.
+  Admins see it under Administration -> Sign-in history.
+- **Bot check (optional):** paste a Cloudflare Turnstile site key into `CAPTCHA_SITE_KEY` in `js/client.js`, publish,
+  then turn on CAPTCHA protection in Supabase (Authentication -> Attack Protection) with the Turnstile secret key.
+  Do it in that order, or sign-in will stop working.
+- Public sign-up is disabled; only admins create accounts. Deactivated users are blocked immediately.
+- Supabase free projects pause after a week with no activity and have no backups; upgrade to Pro (~US$25/mo)
+  for daily-use production and automatic backups.
 
 ## Ideas for later
 Employee self-service logins, certificate file uploads, automatic email reminders before expiry,
