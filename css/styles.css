@@ -509,3 +509,16 @@ tr.row-link:hover .small-arrow { color: var(--brand); }
 .dl-choice.is-busy span::after { content: " · preparing…"; color: var(--brand); }
 .dl-choice:disabled { cursor: progress; opacity: .75; }
 @media (max-width: 480px) { .dl-choices { grid-template-columns: 1fr; } }
+
+/* ---------- Two-step sign-in and bot check ---------- */
+.mfa-steps { margin: 0 0 1.2rem; padding-left: 1.2rem; display: grid; gap: .7rem; line-height: 1.45; color: var(--text); }
+.mfa-qr { margin: .7rem 0 .4rem; width: 200px; height: 200px; padding: 8px; border: 1.5px solid var(--border); border-radius: 10px; background: #fff; display: grid; place-items: center; }
+.mfa-qr img { display: block; width: 184px; height: 184px; }
+.mfa-key summary { cursor: pointer; color: var(--brand); font-weight: 600; font-size: .9rem; }
+.mfa-key p { margin: .4rem 0; font-size: .88rem; color: var(--muted); }
+.mfa-key code { display: inline-block; padding: .35rem .5rem; border-radius: 6px; background: var(--bg); font-size: .95rem; letter-spacing: .04em; word-break: break-all; }
+.auth-card input.code-input { font-size: 1.5rem; letter-spacing: .4em; text-align: center; font-variant-numeric: tabular-nums; }
+.captcha { margin: 0 0 1rem; min-height: 0; }
+.captcha:empty { display: none; }
+.captcha-float { position: fixed; right: 1rem; bottom: 1rem; z-index: 80; }
+.nowrap { white-space: nowrap; }
