@@ -23,6 +23,15 @@ function envKey(classic: string, modern: string): string {
   catch { return raw; }
 }
 
+// Admins must have finished two-step sign-in ("aal2" in their login token)
+function tokenAal(token: string): string {
+  try {
+    let b = token.split(".")[1].replace(/-/g, "+").replace(/_/g, "/");
+    while (b.length % 4) b += "=";
+    return String(JSON.parse(atob(b)).aal ?? "");
+  } catch { return ""; }
+}
+
 const json = (body: unknown, status = 200) =>
   new Response(JSON.stringify(body), { status, headers: { ...cors, "Content-Type": "application/json" } });
 
@@ -38,6 +47,7 @@ Deno.serve(async (req) => {
   const token = (req.headers.get("Authorization") ?? "").replace(/^Bearer\s+/i, "");
   const { data: { user }, error: userErr } = await admin.auth.getUser(token);
   if (userErr || !user) return json({ error: "Not signed in." }, 401);
+  if (tokenAal(token) !== "aal2") return json({ error: "Finish two-step sign-in first: sign out, sign back in and enter your authenticator code." }, 403);
 
   const { data: me } = await admin.from("profiles").select("role, active").eq("id", user.id).maybeSingle();
   if (!me || me.role !== "admin" || !me.active) return json({ error: "Only administrators can delete users." }, 403);
