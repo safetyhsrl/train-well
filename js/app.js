@@ -8,8 +8,32 @@
   const WARN_DAYS = CFG.EXPIRY_WARNING_DAYS || 30;
 
   // ---------------------------------------------------------------- state
-  const state = { me: null, facilities: [], courses: [] };
+  const state = { me: null, facilities: [], courses: [], home: "" };
   const isAdmin = () => state.me && state.me.role === "admin";
+  // Admins and managers work across every home; employees only see their own records
+  const seeAll = () => !!state.me && (state.me.role === "admin" || state.me.role === "manager");
+
+  // ---- Home picker (top bar): "" = all homes, otherwise a facility id as text. Remembered per device.
+  const HOME_KEY = "trainwell.home";
+  const homeId = () => (state.home ? Number(state.home) : null);
+  const homeLabel = () => (state.home ? facilityName(homeId()) : "All homes");
+  function fillHomePick() {
+    const pick = document.getElementById("homePick");
+    const opts = [["", "All homes"], ...state.facilities.map((f) => [String(f.id), f.name])];
+    if (pick.options.length !== opts.length || opts.some(([v, t], i) => pick.options[i].value !== v || pick.options[i].text !== t)) {
+      pick.innerHTML = opts.map(([v, t]) => `<option value="${v}">${esc(t)}</option>`).join("");
+    }
+    if (state.home && !state.facilities.some((f) => String(f.id) === state.home)) setHome("");
+    pick.value = state.home;
+  }
+  function setHome(val, { save = true } = {}) {
+    val = val ? String(val) : "";
+    if (val && !state.facilities.some((f) => String(f.id) === val)) val = "";
+    state.home = val;
+    if (save) { try { localStorage.setItem(HOME_KEY, val || "all"); } catch (_) { /* private mode */ } }
+    const pick = document.getElementById("homePick");
+    if (pick) pick.value = val;
+  }
 
   // -------------------------------------------------------------- helpers
   const $ = (sel, root = document) => root.querySelector(sel);
@@ -79,7 +103,7 @@
   }
 
   function facilityOptions(selected, { includeAll = false } = {}) {
-    let opts = includeAll ? `<option value="">All facilities</option>` : "";
+    let opts = includeAll ? `<option value="">All homes</option>` : "";
     for (const f of state.facilities)
       opts += `<option value="${f.id}" ${String(f.id) === String(selected) ? "selected" : ""}>${esc(f.name)}</option>`;
     return opts;
@@ -237,7 +261,7 @@
 
   // Training matrix: one row per employee, one column per course (expiry date, coloured by status)
   async function trainingMatrixSpec(f) {
-    const facId = f.facility ? Number(f.facility) : (isAdmin() ? null : state.me.facility_id);
+    const facId = f.facility ? Number(f.facility) : (seeAll() ? null : state.me.facility_id);
     const q = (f.q || "").toLowerCase();
     let employees = (await loadEmployees({ activeOnly: true })).filter((e) => (!facId || e.facility_id === facId)
       && (!q || `${e.first_name} ${e.last_name} ${e.employee_no || ""}`.toLowerCase().includes(q)));
@@ -302,7 +326,7 @@
     });
     return { file: `TrainWell-fire-drills${f.facility ? "-" + safeName(facilityName(Number(f.facility))) : ""}${f.year ? "-" + f.year : ""}-${todayISO()}`,
       title: "Fire drill reports", columns, rows,
-      subtitle: filterLine([f.facility ? facilityName(Number(f.facility)) : (isAdmin() ? "All homes" : facilityName(state.me.facility_id)), f.year ? `Year ${f.year}` : "All years", `${rows.length} reports`]) };
+      subtitle: filterLine([f.facility ? facilityName(Number(f.facility)) : (seeAll() ? "All homes" : facilityName(state.me.facility_id)), f.year ? `Year ${f.year}` : "All years", `${rows.length} reports`]) };
   }
 
   function parseCSV(text) {
@@ -437,78 +461,101 @@
 
   // -------------------------------------------------------- dashboard
   views.dashboard = {
-    title: "Dashboard",
+    title: "Dashboard", homeAware: true,
     async render(view) {
-      const employees = await loadEmployees({ activeOnly: true });
-      const { items } = await complianceMatrix(employees);
-      const upcoming = check(await sb.from("sessions").select("*, attendance(count)")
-        .gte("starts_at", new Date().toISOString()).order("starts_at").limit(8));
+      const hid = homeId();
+      const allEmployees = await loadEmployees({ activeOnly: true });
+      const { items: allItems } = await complianceMatrix(allEmployees);
+      const employees = allEmployees.filter((e) => !hid || e.facility_id === hid);
+      const items = allItems.filter((i) => !hid || i.employee.facility_id === hid);
+      let sq = sb.from("sessions").select("*, attendance(count)").gte("starts_at", new Date().toISOString()).order("starts_at").limit(hid ? 8 : 50);
+      if (hid) sq = sq.eq("facility_id", hid);
+      const allUpcoming = check(await sq);
+      const upcoming = allUpcoming.slice(0, 8);
       // Fire drills: last drill per home (the card hides itself if drills aren't set up yet)
       const { data: drillRows, error: drillErr } = await sb.from("fire_drills")
         .select("id, facility_id, drill_date, event_type, q_meeting_area, q_fire_doors, q_windows_doors, q_staff_response, q_corridors_clear, q_pull_stations")
         .order("drill_date", { ascending: false });
       const thisYear = todayISO().slice(0, 4);
       const sched = drillErr ? [] : await loadSchedule();
-      const drillByFac = drillErr ? [] : state.facilities
-        .filter((f) => isAdmin() || f.id === state.me.facility_id)
-        .map((f) => {
-          const ds = drillRows.filter((x) => x.facility_id === f.id);
-          const last = ds[0];
-          return { f, last, next: sched.find((x) => x.facility_id === f.id), year: ds.filter((x) => x.drill_date.startsWith(thisYear)).length,
-            days: last ? Math.round((new Date(todayISO()) - new Date(last.drill_date)) / 86400000) : null };
-        });
+      const homes = state.facilities.filter((f) => (seeAll() || f.id === state.me.facility_id) && (!hid || f.id === hid));
+      const drillOf = (f) => {
+        const ds = drillErr ? [] : drillRows.filter((x) => x.facility_id === f.id);
+        const last = ds[0];
+        return { f, last, next: sched.find((x) => x.facility_id === f.id), year: ds.filter((x) => x.drill_date.startsWith(thisYear)).length,
+          days: last ? Math.round((new Date(todayISO()) - new Date(last.drill_date)) / 86400000) : null };
+      };
+      const drillByFac = drillErr ? [] : homes.map(drillOf);
 
-      const count = (s) => items.filter((i) => i.status === s).length;
-      const okCount = count("valid") + count("expiring");
-      const pct = items.length ? Math.round((okCount / items.length) * 100) : 100;
+      const count = (s, list = items) => list.filter((i) => i.status === s).length;
+      const pctOf = (list) => list.length ? Math.round(list.filter((i) => i.status === "valid" || i.status === "expiring").length / list.length * 100) : 100;
+      const pct = pctOf(items);
+      const tone = (p) => (p >= 90 ? "ok" : p >= 75 ? "warn" : "bad");
 
-      const byFac = state.facilities.map((f) => {
-        const fi = items.filter((i) => i.employee.facility_id === f.id);
-        const ok = fi.filter((i) => i.status === "valid" || i.status === "expiring").length;
-        return { f, n: employees.filter((e) => e.facility_id === f.id).length,
-          pct: fi.length ? Math.round(ok / fi.length * 100) : 100,
-          expired: fi.filter((i) => i.status === "expired").length,
-          missing: fi.filter((i) => i.status === "missing").length };
-      }).filter((r) => isAdmin() || r.f.id === state.me.facility_id);
+      const byFac = homes.map((f) => {
+        const fi = allItems.filter((i) => i.employee.facility_id === f.id);
+        return { f, n: allEmployees.filter((e) => e.facility_id === f.id).length, pct: pctOf(fi),
+          expired: count("expired", fi), expiring: count("expiring", fi), missing: count("missing", fi),
+          drill: drillOf(f), session: allUpcoming.find((x) => x.facility_id === f.id) };
+      });
 
       const attention = items.filter((i) => i.status !== "valid")
         .sort((a, b) => ({ expired: 0, expiring: 1, missing: 2 }[a.status] - { expired: 0, expiring: 1, missing: 2 }[b.status])
           || String(a.expires_on).localeCompare(String(b.expires_on)))
         .slice(0, 15);
+      const multi = !hid && byFac.length > 1;
+      const one = hid ? state.facilities.find((f) => f.id === hid) : null;
+
+      // One card per home (All homes view). Clicking a card switches the whole app to that home.
+      const homeCard = (r) => `
+        <button type="button" class="home-card" data-home="${r.f.id}" aria-label="Show ${esc(r.f.name)}">
+          <span class="home-card-head"><strong>${esc(r.f.name)}</strong>${r.f.address ? `<span class="muted">${esc(r.f.address)}</span>` : ""}</span>
+          <span class="home-card-pct"><span class="home-card-num ${tone(r.pct)}">${r.pct}%</span><span class="muted">mandatory training up to date</span></span>
+          <span class="bar"><span style="width:${r.pct}%;background:${r.pct >= 90 ? "var(--ok)" : r.pct >= 75 ? "var(--accent)" : "var(--bad)"}"></span></span>
+          <span class="home-card-facts">
+            <span><strong>${r.n}</strong> active staff</span>
+            <span class="${r.expired ? "t-bad" : ""}"><strong>${r.expired}</strong> overdue</span>
+            <span class="${r.expiring ? "t-warn" : ""}"><strong>${r.expiring}</strong> due in ${WARN_DAYS} days</span>
+            <span class="${r.missing ? "t-bad" : ""}"><strong>${r.missing}</strong> never completed</span>
+          </span>
+          <span class="home-card-foot">
+            <span>Last fire drill: ${drillErr ? "—" : r.drill.last ? `${fmtDate(r.drill.last.drill_date)} <span class="muted">(${r.drill.days} days ago)</span>` : `<span class="t-bad">none recorded</span>`}</span>
+            <span>Next session: ${r.session ? `${fmtDate(r.session.starts_at)} · ${esc(courseTitle(r.session.course_id))}` : '<span class="muted">none scheduled</span>'}</span>
+          </span>
+          <span class="stat-go">Open this home</span>
+        </button>`;
 
       view.innerHTML = `
+        ${one ? `<p class="dash-scope">Showing <strong>${esc(one.name)}</strong>${one.address ? ` · ${esc(one.address)}` : ""}.
+          <button type="button" class="link" data-home="">See all homes</button></p>` : ""}
         <div class="stats">
           <a class="stat stat-link" href="#employees" data-pre="employees:status:active"><div class="label">Active employees</div><div class="value">${employees.length}</div><span class="stat-go">View employees</span></a>
-          <a class="stat stat-link ${pct >= 90 ? "ok" : pct >= 75 ? "warn" : "bad"}" href="#compliance" data-pre="compliance:status:"><div class="label">Mandatory training compliance</div><div class="value">${pct}%</div><span class="stat-go">See charts</span></a>
+          <a class="stat stat-link ${tone(pct)}" href="#compliance" data-pre="compliance:status:"><div class="label">Mandatory training compliance</div><div class="value">${pct}%</div><span class="stat-go">See charts</span></a>
           <a class="stat stat-link warn" href="#compliance" data-pre="compliance:status:expiring"><div class="label">Expiring in ${WARN_DAYS} days</div><div class="value">${count("expiring")}</div><span class="stat-go">See who</span></a>
           <a class="stat stat-link bad" href="#compliance" data-pre="compliance:status:expired"><div class="label">Expired</div><div class="value">${count("expired")}</div><span class="stat-go">See who</span></a>
           <a class="stat stat-link bad" href="#compliance" data-pre="compliance:status:missing"><div class="label">Never completed</div><div class="value">${count("missing")}</div><span class="stat-go">See who</span></a>
         </div>
 
-        <div class="card">
-          <div class="card-head"><h2>Compliance by facility</h2><a href="#compliance" data-pre="compliance:status:">Open compliance charts →</a></div>
-          <div class="table-wrap"><table>
-            <thead><tr><th>Facility</th><th>Employees</th><th style="width:40%">Compliance</th><th>Expired</th><th>Missing</th></tr></thead>
-            <tbody>${byFac.map((r) => `
-              <tr class="row-link" tabindex="0" data-go="#compliance" data-pre="compliance:facility:${r.f.id}" title="See compliance for ${esc(r.f.name)}"><td><strong>${esc(r.f.name)}</strong></td><td>${r.n}</td>
-                <td><div style="display:flex;gap:.6rem;align-items:center"><div class="bar" style="flex:1"><span style="width:${r.pct}%;background:${r.pct >= 90 ? "var(--ok)" : r.pct >= 75 ? "var(--accent)" : "var(--bad)"}"></span></div><strong>${r.pct}%</strong></div></td>
-                <td>${r.expired}</td><td>${r.missing}</td></tr>`).join("") || `<tr><td colspan="5" class="empty">No facilities yet.</td></tr>`}
-            </tbody></table></div>
-        </div>
+        ${multi ? `
+        <section class="card">
+          <div class="card-head"><h2>Your homes</h2><a href="#compliance" data-pre="compliance:status:">Compare in compliance charts →</a></div>
+          <p class="muted" style="margin:-.4rem 0 1rem">Pick a home to switch every page to it. You can also use the home menu at the top.</p>
+          <div class="home-grid">${byFac.map(homeCard).join("")}</div>
+        </section>` : ""}
 
         ${drillErr ? "" : `
         <div class="card">
           <div style="display:flex;justify-content:space-between;align-items:center;gap:1rem;flex-wrap:wrap">
-            <h2 style="margin:0">Fire drills</h2><a href="#drills" data-pre="drills:facility:">Open Fire Drill →</a></div>
+            <h2 style="margin:0">Fire drills</h2><a href="#drills">Open Fire Drill →</a></div>
           <div class="table-wrap" style="margin-top:.6rem"><table>
             <thead><tr><th>Home</th><th>Last drill</th><th>Days since</th><th>Last outcome</th><th>Drills in ${thisYear}</th><th>Next drill</th></tr></thead>
             <tbody>${drillByFac.map((r) => `
-              <tr class="row-link" tabindex="0" data-go="#drills" data-pre="drills:facility:${isAdmin() ? r.f.id : ""}" title="Open fire drills for ${esc(r.f.name)}"><td><strong>${esc(r.f.name)}</strong></td>
+              <tr class="row-link" tabindex="0" data-go="#drills" data-pre="drills:facility:${r.f.id}" title="Open fire drills for ${esc(r.f.name)}"><td><strong>${esc(r.f.name)}</strong></td>
                 <td>${r.last ? fmtDate(r.last.drill_date) + (r.last.event_type === "alarm" ? " (alarm)" : "") : badge("missing", "None recorded")}</td>
                 <td>${r.days == null ? "—" : r.days}</td>
                 <td>${r.last ? (drillIssues(r.last) ? badge("expired", drillIssues(r.last) + (drillIssues(r.last) > 1 ? " issues" : " issue")) : badge("valid", "No issues")) : "—"}</td>
                 <td>${r.year}</td>
-                <td>${r.next ? `${fmtDate(r.next.scheduled_date)} ${whenBadge(r.next.scheduled_date)}` : badge("neutral", "Not scheduled")}</td></tr>`).join("") || `<tr><td colspan="6" class="empty">No facilities yet.</td></tr>`}
+                <td>${r.next ? `${fmtDate(r.next.scheduled_date)} ${whenBadge(r.next.scheduled_date)}` : badge("neutral", "Not scheduled")}</td></tr>`).join("") || `<tr><td colspan="6" class="empty">No homes yet.</td></tr>`}
             </tbody></table></div>
         </div>`}
 
@@ -516,27 +563,29 @@
           <div class="card">
             <div class="card-head"><h2>Needs attention</h2><a href="#compliance" data-pre="compliance:status:">See all →</a></div>
             <div class="table-wrap"><table>
-              <thead><tr><th>Employee</th><th>Course</th><th>Status</th><th>Expires</th></tr></thead>
+              <thead><tr><th>Employee</th>${hid ? "" : "<th>Home</th>"}<th>Course</th><th>Status</th><th>Expires</th></tr></thead>
               <tbody>${attention.map((i) => `
                 <tr class="row-link" tabindex="0" data-open-emp="${i.employee.id}"><td><button class="link" data-emp="${i.employee.id}">${esc(fullName(i.employee))}</button></td>
+                  ${hid ? "" : `<td>${esc(facilityName(i.employee.facility_id))}</td>`}
                   <td>${esc(i.course.title)}</td><td>${badge(i.status)}</td><td>${fmtDate(i.expires_on)}</td></tr>`).join("")
-                || `<tr><td colspan="4" class="empty">Everyone is up to date. 🎉</td></tr>`}
+                || `<tr><td colspan="${hid ? 4 : 5}" class="empty">Everyone is up to date. 🎉</td></tr>`}
               </tbody></table></div>
             ${attention.length ? `<p style="margin:.8rem 0 0"><a href="#compliance" data-pre="compliance:status:">See everyone who needs action →</a></p>` : ""}
           </div>
           <div class="card">
             <div class="card-head"><h2>Upcoming sessions</h2><a href="#sessions" data-pre="sessions:when:upcoming">Open Sessions & attendance →</a></div>
             <div class="table-wrap"><table>
-              <thead><tr><th>Date</th><th>Course</th><th>Facility</th><th>Booked</th></tr></thead>
+              <thead><tr><th>Date</th><th>Course</th>${hid ? "" : "<th>Home</th>"}<th>Booked</th></tr></thead>
               <tbody>${upcoming.map((s) => `
                 <tr class="row-link" tabindex="0" data-go="#sessions/${s.id}" data-pre="sessions:when:upcoming" title="Open attendance for this session"><td>${fmtDateTime(s.starts_at)}</td><td>${esc(courseTitle(s.course_id))}</td>
-                  <td>${esc(facilityName(s.facility_id))}</td>
+                  ${hid ? "" : `<td>${esc(facilityName(s.facility_id))}</td>`}
                   <td>${s.attendance[0]?.count ?? 0}${s.capacity ? " / " + s.capacity : ""}</td></tr>`).join("")
-                || `<tr><td colspan="4" class="empty">No sessions scheduled. <a href="#sessions">Schedule one</a></td></tr>`}
+                || `<tr><td colspan="${hid ? 3 : 4}" class="empty">No sessions scheduled. <a href="#sessions">Schedule one</a></td></tr>`}
               </tbody></table></div>
           </div>
         </div>`;
       $$("[data-emp]", view).forEach((b) => b.onclick = (e) => { e.stopPropagation(); showEmployee(Number(b.dataset.emp)); });
+      $$("[data-home]", view).forEach((b) => b.onclick = () => { setHome(b.dataset.home); route(); window.scrollTo({ top: 0 }); });
       wireLinks(view);
     }
   };
@@ -567,7 +616,7 @@
         <div class="card">
           <div class="toolbar">
             <input type="search" placeholder="Search name, title, department…" value="${esc(f.q)}" data-f="q">
-            ${isAdmin() ? `<select data-f="facility">${facilityOptions(f.facility, { includeAll: true })}</select>` : ""}
+            
             <select data-f="status">
               <option value="active" ${f.status === "active" ? "selected" : ""}>Active</option>
               <option value="inactive" ${f.status === "inactive" ? "selected" : ""}>Inactive</option>
@@ -621,7 +670,7 @@
         if (act === "import") importEmployees();
         if (act === "export") offerDownload(async () => ({
           file: `TrainWell-employees${f.facility ? "-" + safeName(facilityName(Number(f.facility))) : ""}-${todayISO()}`, title: "Employees",
-          subtitle: filterLine([f.facility ? facilityName(Number(f.facility)) : (isAdmin() ? "All homes" : facilityName(state.me.facility_id)),
+          subtitle: filterLine([f.facility ? facilityName(Number(f.facility)) : (seeAll() ? "All homes" : facilityName(state.me.facility_id)),
             f.status ? (f.status === "active" ? "Active" : "Inactive") : "All statuses", f.q ? `Search: "${f.q}"` : "", `${shownEmps.length} employees`]),
           columns: [{ h: "Last name", w: 16 }, { h: "First name", w: 16 }, { h: "Job title", w: 20 }, { h: "Department", w: 18 }, { h: "Home", w: 24 },
             { h: "Email", w: 28 }, { h: "Phone", w: 15 }, { h: "Hire date", w: 12, date: true }, { h: "Status", w: 10 }],
@@ -633,7 +682,7 @@
   };
 
   function editEmployee(e) {
-    const isNew = !e; e = e || { status: "active", facility_id: state.me.facility_id };
+    const isNew = !e; e = e || { status: "active", facility_id: homeId() || state.me.facility_id || state.facilities[0]?.id };
     openModal({
       title: isNew ? "Add employee" : "Edit employee",
       body: `
@@ -641,7 +690,7 @@
           <div class="field"><label>First name *</label><input name="first_name" required value="${esc(e.first_name)}"></div>
           <div class="field"><label>Last name *</label><input name="last_name" required value="${esc(e.last_name)}"></div>
           <div class="field"><label>Facility *</label>
-            <select name="facility_id" required ${isAdmin() ? "" : "disabled"}>${facilityOptions(e.facility_id)}</select></div>
+            <select name="facility_id" required ${seeAll() ? "" : "disabled"}>${facilityOptions(e.facility_id)}</select></div>
           <div class="field"><label>Job title</label><input name="job_title" value="${esc(e.job_title)}"></div>
           <div class="field"><label>Department</label><input name="department" value="${esc(e.department)}"></div>
           <div class="field"><label>Email</label><input name="email" type="email" value="${esc(e.email)}"></div>
@@ -656,7 +705,7 @@
       async onSubmit(d) {
         const row = {
           first_name: d.first_name.trim(), last_name: d.last_name.trim(),
-          facility_id: Number(isAdmin() ? d.facility_id : (e.facility_id || state.me.facility_id)),
+          facility_id: Number(seeAll() ? d.facility_id : (e.facility_id || state.me.facility_id)),
           job_title: nn(d.job_title), department: nn(d.department), email: nn(d.email), phone: nn(d.phone),
           hire_date: nn(d.hire_date), status: d.status
         };
@@ -680,7 +729,7 @@
       body: `
         <p class="muted" style="margin-top:0">Columns (first row = headers): <code>first_name, last_name, email, phone,
         job_title, department, facility, hire_date</code>. Only first and last name are required. <code>facility</code> must match a
-        facility name${isAdmin() ? "" : " (or leave blank for yours)"}. Dates as YYYY-MM-DD.</p>
+        facility name${seeAll() ? "" : " (or leave blank for yours)"}. Dates as YYYY-MM-DD.</p>
         <p><button type="button" class="link" data-template>Download a blank template</button></p>
         <div class="field"><label>CSV file</label><input type="file" name="file" accept=".csv,text/csv" required></div>
         <div data-preview class="muted"></div>`,
@@ -696,8 +745,8 @@
         rows.slice(1).forEach((r, i) => {
           const get = (k) => idx(k) >= 0 ? nn(r[idx(k)]) : null;
           const facName = get("facility");
-          let facility_id = facName ? facByName.get(facName.toLowerCase()) : (isAdmin() ? null : state.me.facility_id);
-          if (!isAdmin() && facility_id && facility_id !== state.me.facility_id) facility_id = undefined;
+          let facility_id = facName ? facByName.get(facName.toLowerCase()) : (seeAll() ? null : state.me.facility_id);
+          if (!seeAll() && facility_id && facility_id !== state.me.facility_id) facility_id = undefined;
           if (!get("first_name") || !get("last_name")) { problems.push(`Row ${i + 2}: missing name`); return; }
           if (!facility_id) { problems.push(`Row ${i + 2}: unknown facility "${facName || ""}"`); return; }
           const hd = get("hire_date");
@@ -927,7 +976,7 @@
               <option value="">Any status</option>
               ${["valid", "expiring", "expired"].map((s) => `<option value="${s}" ${f.status === s ? "selected" : ""}>${s[0].toUpperCase() + s.slice(1)}</option>`).join("")}
             </select>
-            ${isAdmin() ? `<select data-f="facility">${facilityOptions(f.facility, { includeAll: true })}</select>` : ""}
+            
             <span class="spacer"></span><span class="muted" data-count></span>
           </div>
           <div class="table-wrap"><table>
@@ -978,7 +1027,7 @@
       <div class="field"><label>${esc(label)} <span data-selcount class="muted"></span></label>
         <div class="toolbar" style="margin-bottom:.4rem">
           <input type="search" placeholder="Filter…" data-pick-filter style="flex:1">
-          ${isAdmin() && facilityFilter ? `<select data-pick-fac>${facilityOptions("", { includeAll: true })}</select>` : ""}
+          ${seeAll() && facilityFilter ? `<select data-pick-fac>${facilityOptions(state.home, { includeAll: true })}</select>` : ""}
           <button type="button" class="secondary small" data-pick-all>Select shown</button>
           <button type="button" class="secondary small" data-pick-none>Clear</button>
         </div>
@@ -1003,7 +1052,7 @@
     $("[data-pick-fac]", form)?.addEventListener("input", apply);
     $("[data-pick-all]", form).onclick = () => { $$("label:not(.hidden) input", list).forEach((c) => c.checked = true); count(); };
     $("[data-pick-none]", form).onclick = () => { $$("input", list).forEach((c) => c.checked = false); count(); };
-    list.addEventListener("change", count); count();
+    list.addEventListener("change", count); count(); apply();
   }
   const pickedIds = (form) => $$("input[name=emp]:checked", form).map((c) => Number(c.value));
 
@@ -1065,7 +1114,7 @@
             <select data-f="when">
               <option value="upcoming" ${f.when === "upcoming" ? "selected" : ""}>Upcoming</option>
               <option value="past" ${f.when === "past" ? "selected" : ""}>Past</option></select>
-            ${isAdmin() ? `<select data-f="facility">${facilityOptions(f.facility, { includeAll: true })}</select>` : ""}
+            
           </div>
           <div class="table-wrap"><table>
             <thead><tr><th>Date</th><th>Course</th><th>Facility</th><th>Location</th><th>Trainer</th><th>Booked</th><th>Attended</th><th></th></tr></thead>
@@ -1099,13 +1148,13 @@
   };
 
   function editSession(s) {
-    const isNew = !s; s = s || { facility_id: state.me.facility_id };
+    const isNew = !s; s = s || { facility_id: homeId() || state.me.facility_id || state.facilities[0]?.id };
     openModal({
       title: isNew ? "Schedule session" : "Edit session",
       body: `
         <div class="grid2">
           <div class="field"><label>Course *</label><select name="course_id" required>${courseOptions(s.course_id)}</select></div>
-          <div class="field"><label>Facility *</label><select name="facility_id" required ${isAdmin() ? "" : "disabled"}>${facilityOptions(s.facility_id)}</select></div>
+          <div class="field"><label>Facility *</label><select name="facility_id" required ${seeAll() ? "" : "disabled"}>${facilityOptions(s.facility_id)}</select></div>
           <div class="field"><label>Starts *</label><input type="datetime-local" name="starts_at" required value="${toLocalInput(s.starts_at)}"></div>
           <div class="field"><label>Ends</label><input type="datetime-local" name="ends_at" value="${toLocalInput(s.ends_at)}"></div>
           <div class="field"><label>Location / room</label><input name="location" value="${esc(s.location)}"></div>
@@ -1115,7 +1164,7 @@
         <div class="field"><label>Notes</label><textarea name="notes" rows="2">${esc(s.notes)}</textarea></div>`,
       async onSubmit(d) {
         const row = { course_id: Number(d.course_id),
-          facility_id: Number(isAdmin() ? d.facility_id : (s.facility_id || state.me.facility_id)),
+          facility_id: Number(seeAll() ? d.facility_id : (s.facility_id || state.me.facility_id)),
           starts_at: new Date(d.starts_at).toISOString(), ends_at: d.ends_at ? new Date(d.ends_at).toISOString() : null,
           location: nn(d.location), trainer: nn(d.trainer), capacity: nn(d.capacity), notes: nn(d.notes) };
         if (row.ends_at && row.ends_at < row.starts_at) throw new Error("End time is before the start time.");
@@ -1259,7 +1308,7 @@
         <div class="card">
           <h2>Fire drill reports</h2>
           <div class="toolbar">
-            ${isAdmin() ? `<select data-f="facility">${facilityOptions(f.facility, { includeAll: true })}</select>` : ""}
+            
             <select data-f="year"><option value="">All years</option>
               ${years.map((y) => `<option value="${y}" ${f.year === y ? "selected" : ""}>${y}</option>`).join("")}</select>
             <span class="spacer"></span><span class="muted">${drills.length} report${drills.length === 1 ? "" : "s"}</span>
@@ -1323,7 +1372,7 @@
   }
   function editSchedule(x) {
     const isNew = !x;
-    x = x || { facility_id: state.me.facility_id || state.facilities[0]?.id };
+    x = x || { facility_id: homeId() || state.me.facility_id || state.facilities[0]?.id };
     const radio = (value, label) =>
       `<label class="choice"><input type="radio" name="activity" value="${value}" ${x.activity === value ? "checked" : ""}> ${esc(label)}</label>`;
     openModal({
@@ -1331,7 +1380,7 @@
       body: `
         <div class="grid2">
           <div class="field"><label>Home *</label>
-            <select name="facility_id" required ${isAdmin() ? "" : "disabled"}>${facilityOptions(x.facility_id)}</select></div>
+            <select name="facility_id" required ${seeAll() ? "" : "disabled"}>${facilityOptions(x.facility_id)}</select></div>
           <div class="field"><label>Date *</label><input type="date" name="scheduled_date" required value="${esc(x.scheduled_date)}" ${isNew ? `min="${todayISO()}"` : ""}></div>
           <div class="field"><label>Time</label><input type="time" name="scheduled_time" value="${hhmm(x.scheduled_time)}"></div>
           <div class="field"><label>Coordinator</label><input name="coordinator" value="${esc(x.coordinator)}"></div>
@@ -1340,7 +1389,7 @@
           <div class="choices stacked">${Object.entries(DRILL_ACTIVITY).map(([k, v]) => radio(k, v)).join("")}</div></div>
         <div class="field"><label>Notes</label><textarea name="notes" rows="2" placeholder="e.g. night shift drill, test new pull station">${esc(x.notes)}</textarea></div>`,
       async onSubmit(v) {
-        const row = { facility_id: Number(isAdmin() ? v.facility_id : (x.facility_id || state.me.facility_id)), scheduled_date: v.scheduled_date,
+        const row = { facility_id: Number(seeAll() ? v.facility_id : (x.facility_id || state.me.facility_id)), scheduled_date: v.scheduled_date,
           scheduled_time: nn(v.scheduled_time), activity: nn(v.activity), coordinator: nn(v.coordinator), notes: nn(v.notes) };
         const res = isNew ? await sb.from("fire_drill_schedule").insert({ ...row, created_by: state.me.id })
           : await sb.from("fire_drill_schedule").update(row).eq("id", x.id);
@@ -1353,7 +1402,7 @@
   }
 
   async function editDrill(id, { schedule = null } = {}) {
-    let d = { facility_id: state.me.facility_id || state.facilities[0]?.id, drill_date: todayISO(), event_type: "drill", fire_drill_participants: [] };
+    let d = { facility_id: homeId() || state.me.facility_id || state.facilities[0]?.id, drill_date: todayISO(), event_type: "drill", fire_drill_participants: [] };
     if (schedule) Object.assign(d, { facility_id: schedule.facility_id, start_time: schedule.scheduled_time, activity: schedule.activity,
       coordinator: schedule.coordinator, drill_date: schedule.scheduled_date <= todayISO() ? schedule.scheduled_date : todayISO() });
     let allEmps;
@@ -1374,7 +1423,7 @@
       body: `
         <div class="grid2">
           <div class="field"><label>Name of home *</label>
-            <select name="facility_id" required data-fac ${isAdmin() ? "" : "disabled"}>${facilityOptions(d.facility_id)}</select></div>
+            <select name="facility_id" required data-fac ${seeAll() ? "" : "disabled"}>${facilityOptions(d.facility_id)}</select></div>
           <div class="field"><label>Date of drill *</label><input type="date" name="drill_date" required value="${esc(d.drill_date)}"></div>
           <div class="field"><label>Start time</label><input type="time" name="start_time" value="${hhmm(d.start_time)}" data-t></div>
           <div class="field"><label>Completion time</label><input type="time" name="end_time" value="${hhmm(d.end_time)}" data-t></div>
@@ -1405,7 +1454,7 @@
         <p class="muted" style="font-size:.85rem">For signatures, save the report and click <strong>Print</strong>. The printout has a sign-in sheet for participants.</p>`,
       async onSubmit(v, frm) {
         if (!v.event_type) throw new Error("Choose the type of event (fire drill or fire alarm).");
-        const facility_id = Number(isAdmin() ? v.facility_id : (d.facility_id || state.me.facility_id));
+        const facility_id = Number(seeAll() ? v.facility_id : (d.facility_id || state.me.facility_id));
         const row = {
           facility_id, drill_date: v.drill_date, start_time: nn(v.start_time), end_time: nn(v.end_time),
           event_type: v.event_type, activity: v.event_type === "drill" ? nn(v.activity) : null,
@@ -2091,8 +2140,8 @@
     const pre = el.dataset.pre; if (!pre) return;
     const [vName, key, ...rest] = pre.split(":"); const val = rest.join(":");
     const v = views[vName]; if (!v || !v.filters) return;
-    if (vName === "compliance") Object.assign(v.filters, { status: "", month: "", facility: v.filters.facility, course: "" });
-    if (vName === "compliance" && key !== "facility" && !isAdmin()) v.filters.facility = "";
+    if (vName === "compliance") Object.assign(v.filters, { status: "", month: "", course: "" });
+    if (key === "facility") { if (val) setHome(val); return; }   // the top-bar picker owns the home
     v.filters[key] = val;
   }
   function wireLinks(root) {
@@ -2161,11 +2210,11 @@
     actions() { return `<button class="secondary" data-act="excel">Download</button>`; },
     async render(view) {
       const f = this.filters;
-      if (!isAdmin()) f.facility = "";
+      if (!seeAll()) f.facility = "";
       const employees = await loadEmployees({ activeOnly: true });
       const { items: all } = await complianceMatrix(employees);
       const mandatory = state.courses.filter((c) => c.mandatory && c.active);
-      const homes = state.facilities.filter((x) => isAdmin() || x.id === state.me.facility_id);
+      const homes = state.facilities.filter((x) => seeAll() || x.id === state.me.facility_id);
       const scoped = all.filter((i) => (!f.facility || String(i.employee.facility_id) === f.facility) && (!f.course || String(i.course.id) === f.course));
       const n = (st, list = scoped) => list.filter((i) => i.status === st).length;
       const current = n("valid") + n("expiring");
@@ -2190,7 +2239,7 @@
 
       view.innerHTML = `
         <div class="filter-row">
-          ${isAdmin() ? `<label>Home <select data-f="facility">${facilityOptions(f.facility, { includeAll: true })}</select></label>` : ""}
+          
           <label>Course <select data-f="course"><option value="">All mandatory courses</option>${mandatory.map((c) => `<option value="${c.id}" ${String(c.id) === f.course ? "selected" : ""}>${esc(c.title)}</option>`).join("")}</select></label>
           ${f.facility || f.course ? `<button type="button" class="link small" data-clear>Clear filters</button>` : ""}
         </div>
@@ -2278,10 +2327,11 @@
         f[inp.dataset.f] = inp.value; if (inp.dataset.f === "status") f.month = "";
         route().then(() => { if (inp.dataset.f === "q" || inp.dataset.f === "status") focusList(); });
       }));
-      $("[data-clear]", view)?.addEventListener("click", () => { f.facility = ""; f.course = ""; route(); });
+      $("[data-clear]", view)?.addEventListener("click", () => { if (f.facility) setHome(""); f.course = ""; route(); });
       $$("[data-seg]", view).forEach((b) => b.addEventListener("click", () => {
         f.status = b.dataset.seg; f.month = "";
-        if (b.dataset.fk) f[b.dataset.fk] = b.dataset.fv;
+        if (b.dataset.fk === "facility") setHome(b.dataset.fv);
+        else if (b.dataset.fk) f[b.dataset.fk] = b.dataset.fv;
         vizTip().classList.add("hidden"); route().then(focusList);
       }));
       $$("[data-legend]", view).forEach((b) => b.addEventListener("click", () => { f.status = b.dataset.legend; f.month = ""; route().then(focusList); }));
@@ -2290,7 +2340,7 @@
       this.onAction = (act) => {
         if (act === "excel") offerDownload(async () => ({
           file: `TrainWell-compliance-${todayISO()}`, title: `Compliance: ${listTitle}`,
-          subtitle: filterLine([f.facility ? facilityName(Number(f.facility)) : (isAdmin() ? "All homes" : facilityName(state.me.facility_id)),
+          subtitle: filterLine([f.facility ? facilityName(Number(f.facility)) : (seeAll() ? "All homes" : facilityName(state.me.facility_id)),
             f.course ? courseTitle(Number(f.course)) : "All mandatory courses", f.q ? `Search: "${f.q}"` : "", `${list.length} rows`]),
           columns: [{ h: "Employee", w: 26 }, { h: "Home", w: 24 }, { h: "Course", w: 28 }, { h: "Status", w: 16 }, { h: "Expires", w: 12, date: true }, { h: "Last completed", w: 14, date: true }],
           rows: list.map((i) => [fullName(i.employee), facilityName(i.employee.facility_id), i.course.title, { v: ST_LABEL[i.status], st: i.status },
@@ -3006,6 +3056,10 @@
       history.replaceState(null, "", "#" + name);
     }
     currentView = v; v.arg = arg;
+    if (v.filters && "facility" in v.filters) v.filters.facility = seeAll() ? state.home : "";
+    const homeAware = seeAll() && (v.homeAware || (v.filters && "facility" in v.filters));
+    if (homeAware) fillHomePick();
+    $("#homePickWrap").classList.toggle("hidden", !homeAware);
     const navName = (typeof v.navAs === "function" ? v.navAs() : v.navAs) || name;
     $$("#nav a").forEach((a) => a.classList.toggle("active", a.getAttribute("href") === "#" + navName));
     $("#pageTitle").textContent = v.title;
@@ -3047,10 +3101,16 @@
       $$(".employee-only").forEach((el) => el.classList.remove("hidden"));
     }
     $("#meName").textContent = me.full_name;
-    $("#meRole").textContent = me.role === "admin" ? "Administrator · all facilities"
+    $("#meRole").textContent = me.role === "admin" ? "Administrator · all homes"
       : me.role === "employee" ? `Staff · ${facilityName(state.myEmp?.facility_id)}` : `Manager · ${facilityName(me.facility_id)}`;
     if (!isAdmin()) $$(".admin-only").forEach((el) => el.classList.add("hidden"));
-    if (!isAdmin()) views.employees.filters.facility = "";
+    if (seeAll()) {
+      let saved = null; try { saved = localStorage.getItem(HOME_KEY); } catch (_) { /* private mode */ }
+      // First visit: managers start on their own home, admins on all homes
+      setHome(saved == null ? (me.role === "manager" ? me.facility_id : "") : saved === "all" ? "" : saved, { save: false });
+      fillHomePick();
+      $("#homePick").addEventListener("change", (e) => { setHome(e.target.value); route(); });
+    }
     $("#shell").classList.remove("hidden");
     route();
   })().catch((ex) => {
