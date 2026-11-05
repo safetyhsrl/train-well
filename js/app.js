@@ -17,6 +17,7 @@
   const HOME_KEY = "trainwell.home";
   const homeId = () => (state.home ? Number(state.home) : null);
   const homeLabel = () => (state.home ? facilityName(homeId()) : "All homes");
+  // The home bar: one tab per home (a dropdown on phones), plus "Add home" for admins
   function fillHomePick() {
     const pick = document.getElementById("homePick");
     const opts = [["", "All homes"], ...state.facilities.map((f) => [String(f.id), f.name])];
@@ -25,6 +26,8 @@
     }
     if (state.home && !state.facilities.some((f) => String(f.id) === state.home)) setHome("");
     pick.value = state.home;
+    document.getElementById("homeTabs").innerHTML = opts.map(([v, t]) =>
+      `<button type="button" role="tab" class="home-tab${v === state.home ? " is-on" : ""}" aria-selected="${v === state.home}" data-home-tab="${v}">${esc(t)}</button>`).join("");
   }
   function setHome(val, { save = true } = {}) {
     val = val ? String(val) : "";
@@ -33,6 +36,9 @@
     if (save) { try { localStorage.setItem(HOME_KEY, val || "all"); } catch (_) { /* private mode */ } }
     const pick = document.getElementById("homePick");
     if (pick) pick.value = val;
+    document.querySelectorAll("[data-home-tab]").forEach((b) => {
+      const on = b.dataset.homeTab === val; b.classList.toggle("is-on", on); b.setAttribute("aria-selected", String(on));
+    });
   }
 
   // -------------------------------------------------------------- helpers
@@ -2555,6 +2561,77 @@
   }
 
   // -------------------------------------------------------- facilities (admin)
+  // -------------------------------------------------------- schedule (everyone)
+  // Mounts js/schedule.js. Staff on the schedule are Train Well employees (not logins),
+  // and every id is passed to the schedule as text so its comparisons line up.
+  const ID_KEYS = ["id", "facility_id", "employee_id", "shift_id", "offered_by", "picked_up_by"];
+  const idText = (o) => {
+    if (!o || typeof o !== "object") return o;
+    const x = { ...o };
+    for (const k of ID_KEYS) if (x[k] != null) x[k] = String(x[k]);
+    if (x.shift) x.shift = idText(x.shift);
+    return x;
+  };
+  const idNum = (v) => (v == null || v === "" ? null : Number(v));
+  function scheduleAdapter() {
+    const ok = ({ data, error }) => {
+      if (!error) return data;
+      throw new Error(/schema cache|does not exist|Could not find/i.test(error.message)
+        ? "The schedule isn't set up in the database yet. An admin needs to run supabase/update-2026-11-schedule.sql in Supabase."
+        : error.message);
+    };
+    const all = async (build) => {
+      const out = [];
+      for (let i = 0; ; i += 1000) { const page = ok(await build().range(i, i + 999)); out.push(...page); if (page.length < 1000) return out; }
+    };
+    const meEmpId = () => (isEmployee() ? String(state.me.employee_id) : "none");
+    return {
+      async me() {
+        if (isEmployee()) return { id: meEmpId(), full_name: fullName(state.myEmp), role: "employee",
+          facility_id: state.myEmp?.facility_id != null ? String(state.myEmp.facility_id) : null };
+        return { id: "none", full_name: state.me.full_name, role: state.me.role, facility_id: null };
+      },
+      facilities: async () => state.facilities
+        .filter((f) => seeAll() || f.id === state.myEmp?.facility_id)
+        .map((f) => ({ id: String(f.id), name: f.name })),
+      staff: async (facilityId) => (ok(await sb.rpc("schedule_staff", { p_facility: idNum(facilityId) })) || [])
+        .map((p) => ({ ...idText(p), role: "employee" })),
+      shifts: async ({ from, to, facilityId, employeeId }) => {
+        if (employeeId === "none") return [];
+        return (await all(() => {
+          let q = sb.from("shifts").select("*").lt("starts_at", to.toISOString()).gt("ends_at", from.toISOString()).order("starts_at");
+          if (facilityId) q = q.eq("facility_id", idNum(facilityId));
+          if (employeeId) q = q.eq("employee_id", idNum(employeeId));
+          return q;
+        })).map(idText);
+      },
+      trades: async ({ facilityId, since }) => (await all(() => {
+        let q = sb.from("shift_trades").select("*, shift:shifts(*)")
+          .or(`status.in.(offered,pending),offered_at.gte.${since.toISOString()}`).order("offered_at", { ascending: false });
+        return facilityId ? q.eq("facility_id", idNum(facilityId)) : q;
+      })).map(idText),
+      async saveShift(sh) {
+        const row = { facility_id: idNum(sh.facility_id), employee_id: idNum(sh.employee_id), position: sh.position,
+          notes: sh.notes, starts_at: sh.starts_at, ends_at: sh.ends_at };
+        if (sh.id) ok(await sb.from("shifts").update(row).eq("id", idNum(sh.id)).select());
+        else ok(await sb.from("shifts").insert(row).select());
+      },
+      deleteShift: async (id) => ok(await sb.from("shifts").delete().eq("id", idNum(id))),
+      offerShift: async (id, note) => ok(await sb.rpc("offer_shift", { p_shift_id: idNum(id), p_note: note || null })),
+      cancelTrade: async (id) => ok(await sb.rpc("cancel_trade", { p_trade_id: idNum(id) })),
+      pickUp: async (id) => ok(await sb.rpc("pick_up_shift", { p_trade_id: idNum(id) })),
+      decide: async (id, approve) => ok(await sb.rpc("decide_trade", { p_trade_id: idNum(id), p_approve: approve })),
+    };
+  }
+  views.schedule = {
+    title: "Schedule", everyone: true, homeAware: true,
+    async render(view) {
+      if (!window.Schedule) throw new Error("The schedule didn't load. Refresh the page (Ctrl+F5).");
+      view.innerHTML = `<div id="schedule"></div>`;
+      window.Schedule.init({ container: $("#schedule", view), adapter: scheduleAdapter(), facilityId: seeAll() ? (state.home || null) : null });
+    }
+  };
+
   // -------------------------------------------------------- sign-in history (admin)
   const deviceOf = (ua) => {
     if (!ua) return "—";
@@ -2653,9 +2730,14 @@
         <div class="field"><label>Address</label><input name="address" value="${esc(f.address)}"></div>`,
       async onSubmit(d) {
         const row = { name: d.name.trim(), address: nn(d.address) };
-        if (isNew) check(await sb.from("facilities").insert(row));
+        if (state.facilities.some((x) => x.id !== f.id && x.name.trim().toLowerCase() === row.name.toLowerCase()))
+          throw new Error("A home with that name already exists.");
+        let added = null;
+        if (isNew) added = check(await sb.from("facilities").insert(row).select().single());
         else check(await sb.from("facilities").update(row).eq("id", f.id));
-        await loadLookups(); toast("Facility saved"); route();
+        await loadLookups();
+        if (added) setHome(added.id);        // jump straight to the new home
+        toast(isNew ? `${row.name} added` : "Facility saved"); route();
       }
     });
   }
@@ -3059,7 +3141,7 @@
     if (v.filters && "facility" in v.filters) v.filters.facility = seeAll() ? state.home : "";
     const homeAware = seeAll() && (v.homeAware || (v.filters && "facility" in v.filters));
     if (homeAware) fillHomePick();
-    $("#homePickWrap").classList.toggle("hidden", !homeAware);
+    $("#homeBar").classList.toggle("hidden", !homeAware);
     const navName = (typeof v.navAs === "function" ? v.navAs() : v.navAs) || name;
     $$("#nav a").forEach((a) => a.classList.toggle("active", a.getAttribute("href") === "#" + navName));
     $("#pageTitle").textContent = v.title;
@@ -3110,6 +3192,11 @@
       setHome(saved == null ? (me.role === "manager" ? me.facility_id : "") : saved === "all" ? "" : saved, { save: false });
       fillHomePick();
       $("#homePick").addEventListener("change", (e) => { setHome(e.target.value); route(); });
+      $("#homeTabs").addEventListener("click", (e) => {
+        const b = e.target.closest("[data-home-tab]"); if (!b || b.dataset.homeTab === state.home) return;
+        setHome(b.dataset.homeTab); route();
+      });
+      $("#homeAdd").addEventListener("click", () => editFacility(null));
     }
     $("#shell").classList.remove("hidden");
     route();
