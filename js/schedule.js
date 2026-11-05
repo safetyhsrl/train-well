@@ -69,7 +69,7 @@
     const S = {
       me: null, facilities: [], staff: [], shifts: [], myShifts: [], trades: [],
       facilityId: opts.facilityId ?? null, sec: 'mine', view: 'week', anchor: sod(new Date()),
-      loading: false, error: null, seq: 0,
+      loading: false, error: null, seq: 0, q: '', job: '',
     };
     let saved = {};
     try { saved = JSON.parse(localStorage.getItem('trainwell.schedule') || '{}'); } catch (e) {}
@@ -104,6 +104,8 @@
         if (!S.me) {
           S.me = await api.me();
           S.facilities = await api.facilities();
+          // Managers and admins start on the rota (their own shifts are usually empty)
+          if (!saved.sec && lead()) { S.sec = 'everyone'; S.view = 'week'; }
         }
         const f = fid();
         const now = new Date();
@@ -159,7 +161,10 @@
               <button type="button" class="sc-ico" data-nav="1" aria-label="Next">›</button>
               <span class="sc-range">${esc(rangeText())}</span>
             </div>` : ''}
-            ${lead() && S.sec === 'everyone' ? '<button type="button" class="sc-primary" data-act="add">+ Add shift</button>' : ''}
+            ${lead() && S.sec === 'everyone' ? `<div class="sc-tools">
+              ${S.view === 'week' ? '<button type="button" class="sc-btn" data-act="copy">Copy week…</button><button type="button" class="sc-btn sc-btn-danger" data-act="clear">Clear week…</button>' : ''}
+              <button type="button" class="sc-btn" data-act="many">Add many…</button>
+              <button type="button" class="sc-primary" data-act="add">+ Add shift</button></div>` : ''}
           </div>
           <h2 class="sc-print-title">${esc(fname)} — ${esc(SECTIONS[S.sec].label)}: ${esc((views().find(([k]) => k === S.view) || [, ''])[1])}${r ? ' · ' + esc(rangeText()) : ''}</h2>
           <div class="sc-body ${S.loading ? 'is-loading' : ''}">
@@ -319,11 +324,14 @@
       const wk = S.shifts.filter((s) => s.start >= a && s.start < addDays(a, 7));
       const today = sod(new Date());
       const facIds = fid() ? [fid()] : S.facilities.map((f) => f.id);
-      const staffAll = visibleStaff();
+      const q = S.q.trim().toLowerCase();
+      const jobs = [...new Set(visibleStaff().map((p) => p.job_title).filter(Boolean))].sort();
+      const staffAll = visibleStaff().filter((p) => (!q || p.full_name.toLowerCase().includes(q)) && (!S.job || p.job_title === S.job));
+      const filtering = !!(q || S.job);
       let rows = '';
       for (const f of facIds) {
         const people = staffAll.filter((p) => p.facility_id === f).map((p) => p.id);
-        wk.filter((s) => s.facility_id === f && s.employee_id && !people.includes(s.employee_id)).forEach((s) => people.push(s.employee_id));
+        if (!filtering) wk.filter((s) => s.facility_id === f && s.employee_id && !people.includes(s.employee_id)).forEach((s) => people.push(s.employee_id));
         people.sort((x, y) => nameOf(x, map).localeCompare(nameOf(y, map)));
         const open = wk.filter((s) => s.facility_id === f && !s.employee_id);
         if (!fid()) rows += `<tr class="sc-rota-fac"><th colspan="9">${esc(facName(f))}</th></tr>`;
@@ -333,19 +341,26 @@
             ${days.map((d) => {
               const cell = list.filter((s) => sameDay(s.start, d));
               const add = lead() && empId !== undefined && !cell.length
-                ? `<button type="button" class="sc-cell-add" data-act="add" data-emp="${empId || ''}" data-fac="${f}" data-date="${isoDate(d)}" aria-label="Add shift">+</button>` : '';
+                ? `<button type="button" class="sc-cell-add" data-act="quick" data-emp="${empId || ''}" data-fac="${f}" data-date="${isoDate(d)}" aria-label="Add shift on ${fmtDay(d)}">+</button>` : '';
               return `<td class="${sameDay(d, today) ? 'is-today' : ''}">${cell.map((s) => shiftChip(s, map)).join('')}${add}</td>`;
             }).join('')}
             <td class="sc-rota-hrs">${total ? fmtHrs(total) : ''}</td></tr>`;
         };
-        rows += line('<span class="sc-warn">Open shifts</span>', open.length ? `${open.length} to fill` : '', open, '');
+        if (!filtering) rows += line('<span class="sc-warn">Open shifts</span>', open.length ? `${open.length} to fill` : '', open, '');
         for (const id of people) {
           const p = map[id];
-          rows += line(esc(nameOf(id, map)), p && p.role !== 'employee' ? (p.role === 'admin' ? 'Admin' : 'Manager') : '', wk.filter((s) => s.employee_id === id), id);
+          rows += line(esc(nameOf(id, map)), p ? esc(p.job_title || '') : '', wk.filter((s) => s.employee_id === id), id);
         }
-        if (!people.length) rows += `<tr><td colspan="9" class="sc-muted sc-pad">No staff assigned to this home yet.</td></tr>`;
+        if (!people.length) rows += `<tr><td colspan="9" class="sc-muted sc-pad">${filtering ? 'Nobody here matches the filter.' : 'No staff assigned to this home yet.'}</td></tr>`;
       }
-      return `<div class="sc-scroll"><table class="sc-rota">
+      const shown = staffAll.length;
+      const filters = lead() ? `<div class="sc-filters">
+          <input type="search" class="sc-search" data-filter="q" placeholder="Find staff…" value="${esc(S.q)}" aria-label="Find staff">
+          ${jobs.length ? `<select data-filter="job" aria-label="Job title"><option value="">All job titles</option>${jobs.map((j) => `<option ${j === S.job ? 'selected' : ''}>${esc(j)}</option>`).join('')}</select>` : ''}
+          <span class="sc-muted">${shown} staff · ${wk.filter((s) => s.employee_id).length} shifts · ${fmtHrs(wk.reduce((h, s) => h + (s.employee_id ? hrs(s) : 0), 0))} hours</span>
+          <span class="sc-muted sc-tip">Tip: click + in a box to add a Day, Evening or Night shift in one click.</span>
+        </div>` : '';
+      return filters + `<div class="sc-scroll"><table class="sc-rota">
         <thead><tr><th>Staff</th>${days.map((d) => `<th class="${sameDay(d, today) ? 'is-today' : ''}">${WD[d.getDay()]} <b>${d.getDate()}</b></th>`).join('')}<th>Hrs</th></tr></thead>
         <tbody>${rows}</tbody></table></div>`;
     }
@@ -548,7 +563,7 @@
           <label>End <input type="time" name="end" value="${en}" required></label>
         </div>
         <p class="sc-help sc-overnight" hidden>Ends the next morning (overnight shift).</p>
-        <label>Position <input name="position" list="sc-positions" value="${esc(s ? s.position || '' : preset.position || 'PCA')}" maxlength="40">
+        <label>Position <input name="position" list="sc-positions" value="${esc(s ? s.position || '' : preset.position || (preset.emp && S.staff.find((p) => p.id === preset.emp)?.job_title) || 'PCA')}" maxlength="40">
           <datalist id="sc-positions">${POSITIONS.map((p) => `<option value="${p}">`).join('')}</datalist></label>
         <label>Notes <span class="sc-opt">(optional)</span><input name="notes" value="${esc(s ? s.notes || '' : '')}" maxlength="200"></label>
         <div class="sc-dialog-actions">
@@ -586,6 +601,166 @@
         try { await api.deleteShift(s.id); form.parentElement.remove(); toast('Shift deleted'); load(); }
         catch (ex) { const e = form.querySelector('.sc-error'); e.textContent = ex.message; e.hidden = false; }
       });
+    }
+
+    // One-click shift from the rota: a small menu of the usual shifts next to the + box
+    function quickMenu(btn) {
+      closeQuick();
+      const emp = btn.dataset.emp, fac = btn.dataset.fac, date = btn.dataset.date;
+      const p = staffById()[emp];
+      const menu = document.createElement('div');
+      menu.className = 'sc-quick';
+      menu.setAttribute('role', 'menu');
+      menu.innerHTML = PRESETS.map(([l, a, b]) => `<button type="button" role="menuitem" data-q="${a}-${b}"><span class="sc-dot k-${l === 'Day' ? 'day' : l === 'Evening' ? 'eve' : 'night'}"></span>${l} ${t(new Date('2000-01-01T' + a))}–${t(new Date('2000-01-01T' + b))}</button>`).join('')
+        + '<button type="button" role="menuitem" data-q="custom">Other times…</button>';
+      document.body.appendChild(menu);
+      const r = btn.getBoundingClientRect();
+      menu.style.top = Math.min(window.innerHeight - menu.offsetHeight - 8, r.bottom + 4) + 'px';
+      menu.style.left = Math.min(window.innerWidth - menu.offsetWidth - 8, Math.max(8, r.left)) + 'px';
+      menu.querySelector('button').focus();
+      menu.addEventListener('click', async (e) => {
+        const b = e.target.closest('[data-q]'); if (!b) return;
+        closeQuick();
+        if (b.dataset.q === 'custom') return shiftDialog(null, { emp, fac, date, position: p && p.job_title });
+        const [a, c] = b.dataset.q.split('-');
+        const [st, en] = times(date, a, c);
+        await act(() => api.saveShift({ facility_id: fac, employee_id: emp || null, position: (p && p.job_title) || (emp ? null : 'PCA'),
+          notes: null, starts_at: st.toISOString(), ends_at: en.toISOString() }), emp ? `Shift added for ${p ? p.full_name : 'staff'}` : 'Open shift added');
+      });
+      menu.addEventListener('keydown', (e) => { if (e.key === 'Escape') { closeQuick(); btn.focus(); } });
+      setTimeout(() => document.addEventListener('mousedown', outsideQuick), 0);
+    }
+    function outsideQuick(e) { if (!e.target.closest('.sc-quick')) closeQuick(); }
+    function closeQuick() { document.querySelectorAll('.sc-quick').forEach((m) => m.remove()); document.removeEventListener('mousedown', outsideQuick); }
+    function times(dateIso, a, b) {
+      const d = parseIsoDate(dateIso);
+      const [sh, sm] = a.split(':').map(Number), [eh, em] = b.split(':').map(Number);
+      const st = new Date(d); st.setHours(sh, sm, 0, 0);
+      const en = new Date(d); en.setHours(eh, em, 0, 0);
+      if (en <= st) en.setDate(en.getDate() + 1);
+      return [st, en];
+    }
+
+    // Add the same shift for many people across many days in one go
+    function manyDialog() {
+      const f0 = fid() || (S.facilities[0] && S.facilities[0].id);
+      const [wa] = range() || [sow(S.anchor)];
+      const people = (facId) => S.staff.filter((p) => p.facility_id === facId).sort((a, b) => a.full_name.localeCompare(b.full_name));
+      const jobsOf = (facId) => [...new Set(people(facId).map((p) => p.job_title).filter(Boolean))].sort();
+      const form = modal(`
+        <h2>Add many shifts</h2>
+        <p class="sc-help" style="margin-top:-6px">Pick the people, the days and the times. Anyone already working at that time is skipped.</p>
+        <label>Home <select name="facility">${S.facilities.map((x) => `<option value="${x.id}" ${x.id === f0 ? 'selected' : ''}>${esc(x.name)}</option>`).join('')}</select></label>
+        <div class="sc-row3 sc-row2">
+          <label>From <input type="date" name="from" value="${isoDate(wa)}" required></label>
+          <label>To <input type="date" name="to" value="${isoDate(addDays(wa, 6))}" required></label>
+        </div>
+        <fieldset class="sc-days"><legend>On these days</legend>
+          ${WD.map((w, i) => `<label><input type="checkbox" name="wd" value="${i}" ${i > 0 && i < 6 ? 'checked' : ''}> ${w}</label>`).join('')}
+        </fieldset>
+        <div class="sc-presets" role="group" aria-label="Quick times">${PRESETS.map(([l, a, b]) => `<button type="button" class="sc-btn sc-btn-quiet" data-preset="${a}-${b}">${l} ${t(new Date('2000-01-01T' + a))}–${t(new Date('2000-01-01T' + b))}</button>`).join('')}</div>
+        <div class="sc-row3 sc-row2">
+          <label>Start <input type="time" name="start" value="07:00" required></label>
+          <label>End <input type="time" name="end" value="15:00" required></label>
+        </div>
+        <label>Position <span class="sc-opt">(blank uses each person's job title)</span><input name="position" list="sc-positions" maxlength="40">
+          <datalist id="sc-positions">${POSITIONS.map((p) => `<option value="${p}">`).join('')}</datalist></label>
+        <div class="sc-pick-head"><b>Staff</b>
+          <input type="search" data-pf placeholder="Find…" aria-label="Find staff">
+          <select data-pj aria-label="Job title"></select>
+          <button type="button" class="sc-btn sc-btn-quiet" data-pall>Select shown</button>
+          <button type="button" class="sc-btn sc-btn-quiet" data-pnone>Clear</button></div>
+        <div class="sc-pick" data-plist></div>
+        <label class="sc-check"><input type="checkbox" name="open" value="1"> Also add one open shift per day (for anyone to be assigned later)</label>
+        <p class="sc-help" data-summary></p>
+        <div class="sc-dialog-actions"><span class="sc-spacer"></span>
+          <button type="button" class="sc-btn sc-btn-quiet" data-close>Cancel</button>
+          <button type="submit" class="sc-btn sc-btn-go">Add shifts</button></div>`,
+      async (form) => {
+        const rows = build(form);
+        if (!rows.length) throw new Error('Choose at least one person (or open shifts) and one day.');
+        if (rows.length > 2000) throw new Error('That is more than 2,000 shifts. Add them in smaller batches.');
+        const res = await api.addShifts(rows);
+        toast(`Added ${res.added} shift${res.added === 1 ? '' : 's'}` + (res.skipped ? ` · skipped ${res.skipped} (already working or a duplicate)` : ''));
+      });
+      const list = form.querySelector('[data-plist]');
+      const sel = new Set();
+      const fill = () => {
+        const facId = form.facility.value;
+        form.querySelector('[data-pj]').innerHTML = '<option value="">All job titles</option>' + jobsOf(facId).map((j) => `<option>${esc(j)}</option>`).join('');
+        list.innerHTML = people(facId).map((p) => `<label data-n="${esc(p.full_name.toLowerCase())}" data-j="${esc(p.job_title || '')}"><input type="checkbox" value="${p.id}" ${sel.has(p.id) ? 'checked' : ''}> ${esc(p.full_name)}${p.job_title ? ` <span class="sc-muted">${esc(p.job_title)}</span>` : ''}</label>`).join('')
+          || '<p class="sc-muted">No staff at this home yet.</p>';
+        filt(); summary();
+      };
+      const filt = () => {
+        const q = form.querySelector('[data-pf]').value.trim().toLowerCase(), j = form.querySelector('[data-pj]').value;
+        list.querySelectorAll('label').forEach((l) => { l.hidden = !((!q || l.dataset.n.includes(q)) && (!j || l.dataset.j === j)); });
+      };
+      const build = (form) => {
+        const from = parseIsoDate(form.from.value), to = parseIsoDate(form.to.value);
+        const wds = new Set([...form.querySelectorAll('[name=wd]:checked')].map((c) => Number(c.value)));
+        const map = staffById(); const out = [];
+        const ids = [...sel].filter((id) => map[id] && map[id].facility_id === form.facility.value);
+        if (form.open.checked) ids.push('');
+        for (let d = new Date(from); d <= to && out.length <= 2000; d = addDays(d, 1)) {
+          if (!wds.has(d.getDay())) continue;
+          const [st, en] = times(isoDate(d), form.start.value, form.end.value);
+          for (const id of ids) out.push({ facility_id: form.facility.value, employee_id: id || null,
+            position: form.position.value.trim() || (id && map[id].job_title) || (id ? null : 'PCA'), notes: null,
+            starts_at: st.toISOString(), ends_at: en.toISOString() });
+        }
+        return out;
+      };
+      const summary = () => {
+        let n = 0; try { n = build(form).length; } catch (e) { n = 0; }
+        form.querySelector('[data-summary]').innerHTML = `<b>${sel.size}</b> staff selected · <b>${n}</b> shift${n === 1 ? '' : 's'} will be added.`;
+      };
+      list.addEventListener('change', (e) => { const c = e.target; if (c.type !== 'checkbox') return; c.checked ? sel.add(c.value) : sel.delete(c.value); summary(); });
+      form.querySelector('[data-pf]').addEventListener('input', filt);
+      form.querySelector('[data-pj]').addEventListener('change', filt);
+      form.querySelector('[data-pall]').addEventListener('click', () => { list.querySelectorAll('label:not([hidden]) input').forEach((c) => { c.checked = true; sel.add(c.value); }); summary(); });
+      form.querySelector('[data-pnone]').addEventListener('click', () => { sel.clear(); list.querySelectorAll('input').forEach((c) => { c.checked = false; }); summary(); });
+      form.facility.addEventListener('change', () => { sel.clear(); fill(); });
+      form.querySelectorAll('[data-preset]').forEach((b) => b.addEventListener('click', () => {
+        const [a, c] = b.dataset.preset.split('-'); form.start.value = a; form.end.value = c; summary();
+      }));
+      ['from', 'to', 'start', 'end'].forEach((n) => form[n].addEventListener('input', summary));
+      form.querySelectorAll('[name=wd], [name=open]').forEach((c) => c.addEventListener('change', summary));
+      fill();
+    }
+
+    // Copy this week's rota forward
+    function copyDialog() {
+      const [a, b] = range();
+      const f = fid();
+      const n = S.shifts.filter((s) => s.start >= a && s.start < b && (!f || s.facility_id === f)).length;
+      modal(`
+        <h2>Copy this week</h2>
+        <p class="sc-dialog-shift">${esc(rangeLabel(a, b))} · ${esc(f ? facName(f) : 'All homes')} · ${n} shift${n === 1 ? '' : 's'}</p>
+        <label>Copy it to the next <select name="weeks">${[1, 2, 3, 4, 6, 8].map((w) => `<option value="${w}">${w} week${w > 1 ? 's' : ''}</option>`).join('')}</select></label>
+        <label class="sc-check"><input type="checkbox" name="open" checked> Include open shifts</label>
+        <p class="sc-help">Same people, days and times. Anyone already working at a copied time is skipped, and shifts already copied aren't doubled.</p>
+        <div class="sc-dialog-actions"><span class="sc-spacer"></span>
+          <button type="button" class="sc-btn sc-btn-quiet" data-close>Cancel</button>
+          <button type="submit" class="sc-btn sc-btn-go" ${n ? '' : 'disabled'}>Copy shifts</button></div>`,
+      async (form) => {
+        const res = await api.copyShifts({ from: a, to: b, weeks: Number(form.weeks.value), facilityId: f, includeOpen: form.open.checked });
+        toast(`Copied ${res.added} shift${res.added === 1 ? '' : 's'}` + (res.skipped ? ` · skipped ${res.skipped}` : ''));
+      });
+    }
+
+    function clearDialog() {
+      const [a, b] = range();
+      const f = fid();
+      const n = S.shifts.filter((s) => s.start >= a && s.start < b && (!f || s.facility_id === f)).length;
+      modal(`
+        <h2>Clear this week</h2>
+        <p class="sc-dialog-shift">${esc(rangeLabel(a, b))} · ${esc(f ? facName(f) : 'All homes')}</p>
+        <p>This deletes all <b>${n}</b> shift${n === 1 ? '' : 's'} shown for this week, including any on the tradeboard. It can't be undone.</p>
+        <div class="sc-dialog-actions"><span class="sc-spacer"></span>
+          <button type="button" class="sc-btn sc-btn-quiet" data-close>Cancel</button>
+          <button type="submit" class="sc-btn sc-btn-danger" ${n ? '' : 'disabled'}>Delete ${n} shift${n === 1 ? '' : 's'}</button></div>`,
+      async () => { await api.clearShifts({ from: a, to: b, facilityId: f }); toast('Week cleared'); });
     }
 
     function offerDialog(shift) {
@@ -632,6 +807,10 @@
       const a = b.dataset.act, id = b.dataset.id;
       if (a === 'print') return opts.onPrint ? opts.onPrint() : window.print();
       if (a === 'add') return shiftDialog(null, { emp: b.dataset.emp, fac: b.dataset.fac, date: b.dataset.date });
+      if (a === 'quick') return quickMenu(b);
+      if (a === 'many') return manyDialog();
+      if (a === 'copy') return copyDialog();
+      if (a === 'clear') return clearDialog();
       if (a === 'edit') return shiftDialog(S.shifts.find((s) => s.id === id) || S.myShifts.find((s) => s.id === id));
       if (a === 'offer') return offerDialog(S.myShifts.find((s) => s.id === id));
       if (a === 'cancel') return act(() => api.cancelTrade(id), 'Offer withdrawn');
@@ -639,8 +818,16 @@
       if (a === 'approve') return act(() => api.decide(id, true), 'Trade approved — schedule updated');
       if (a === 'decline') return act(() => api.decide(id, false), 'Trade declined');
     };
+    const onInput = (e) => {
+      const el = e.target.closest('[data-filter]'); if (!el || !root.contains(el)) return;
+      S[el.dataset.filter] = el.value;
+      const keep = el.dataset.filter === 'q' ? [el.selectionStart, el.selectionEnd] : null;
+      paint();
+      if (keep) { const box = root.querySelector('[data-filter="q"]'); if (box) { box.focus(); box.setSelectionRange(keep[0], keep[1]); } }
+    };
     root.addEventListener('click', onClick);
-    root._scDestroy = () => { root.removeEventListener('click', onClick); root._scDestroy = null; };
+    root.addEventListener('input', onInput);
+    root._scDestroy = () => { root.removeEventListener('click', onClick); root.removeEventListener('input', onInput); closeQuick(); root._scDestroy = null; };
 
     if (!views().some(([k]) => k === S.view)) S.view = SECTIONS[S.sec].views[0][0];
     load();

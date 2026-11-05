@@ -2619,6 +2619,15 @@
         else ok(await sb.from("shifts").insert(row).select());
       },
       deleteShift: async (id) => ok(await sb.from("shifts").delete().eq("id", idNum(id))),
+      addShifts: async (rows) => ok(await sb.rpc("add_shifts", { p_rows: rows.map((r) => ({ ...r,
+        facility_id: idNum(r.facility_id), employee_id: idNum(r.employee_id) })) })),
+      copyShifts: async ({ from, to, weeks, facilityId, includeOpen }) => ok(await sb.rpc("copy_shifts", {
+        p_from: from.toISOString(), p_to: to.toISOString(), p_weeks: weeks, p_facility: idNum(facilityId), p_include_open: includeOpen })),
+      clearShifts: async ({ from, to, facilityId }) => {
+        let q = sb.from("shifts").delete().gte("starts_at", from.toISOString()).lt("starts_at", to.toISOString());
+        if (facilityId) q = q.eq("facility_id", idNum(facilityId));
+        return ok(await q);
+      },
       offerShift: async (id, note) => ok(await sb.rpc("offer_shift", { p_shift_id: idNum(id), p_note: note || null })),
       cancelTrade: async (id) => ok(await sb.rpc("cancel_trade", { p_trade_id: idNum(id) })),
       pickUp: async (id) => ok(await sb.rpc("pick_up_shift", { p_trade_id: idNum(id) })),
