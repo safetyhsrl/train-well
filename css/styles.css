@@ -555,3 +555,27 @@ tr.row-link:hover .small-arrow { color: var(--brand); }
   .home-pick select { min-width: 0; max-width: none; flex: 1; }
 }
 .home-card .bar { display: block; }
+
+/* ---------- Home bar (one tab per home) ---------- */
+.home-bar { display: flex; align-items: center; gap: .6rem; margin: -.4rem 0 1.2rem; padding: .45rem .5rem .45rem .8rem;
+  background: var(--surface); border: 1.5px solid var(--border); border-radius: 12px; }
+.home-bar.hidden { display: none; }
+.home-bar-ico { flex: none; color: var(--brand); }
+.home-tabs { display: flex; gap: .35rem; flex: 1; min-width: 0; overflow-x: auto; scrollbar-width: none; }
+.home-tabs::-webkit-scrollbar { display: none; }
+.home-tab { flex: none; padding: .45rem .95rem; border-radius: 999px; border: 1.5px solid var(--border); background: transparent;
+  color: var(--text); font-weight: 600; font-size: .92rem; white-space: nowrap; cursor: pointer; }
+.home-tab:hover { border-color: var(--brand); background: var(--brand-soft); color: var(--brand-dark); }
+.home-tab.is-on, .home-tab.is-on:hover { background: var(--brand); border-color: var(--brand); color: #fff; }
+.home-tab:focus-visible, .home-add:focus-visible { outline: 3px solid rgba(1, 174, 242, .45); outline-offset: 2px; }
+.home-select { display: none; flex: 1; min-width: 0; font-weight: 600; }
+.home-add { flex: none; padding: .45rem .9rem; border-radius: 8px; border: 1.5px dashed var(--brand); background: var(--brand-soft);
+  color: var(--brand-dark); font-weight: 600; font-size: .9rem; cursor: pointer; }
+.home-add:hover { background: var(--brand); border-style: solid; color: #fff; }
+.home-add.hidden { display: none; }
+@media (max-width: 760px) {
+  .home-tabs { display: none; }
+  .home-select { display: block; }
+  .home-bar { margin-top: 0; }
+}
+@media print { .home-bar { display: none !important; } }
