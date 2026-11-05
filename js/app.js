@@ -20,13 +20,15 @@
   // The home bar: one tab per home (a dropdown on phones), plus "Add home" for admins
   function fillHomePick() {
     const pick = document.getElementById("homePick");
+    if (!pick) return;
     const opts = [["", "All homes"], ...state.facilities.map((f) => [String(f.id), f.name])];
     if (pick.options.length !== opts.length || opts.some(([v, t], i) => pick.options[i].value !== v || pick.options[i].text !== t)) {
       pick.innerHTML = opts.map(([v, t]) => `<option value="${v}">${esc(t)}</option>`).join("");
     }
     if (state.home && !state.facilities.some((f) => String(f.id) === state.home)) setHome("");
     pick.value = state.home;
-    document.getElementById("homeTabs").innerHTML = opts.map(([v, t]) =>
+    const tabs = document.getElementById("homeTabs");
+    if (tabs) tabs.innerHTML = opts.map(([v, t]) =>
       `<button type="button" role="tab" class="home-tab${v === state.home ? " is-on" : ""}" aria-selected="${v === state.home}" data-home-tab="${v}">${esc(t)}</button>`).join("");
   }
   function setHome(val, { save = true } = {}) {
@@ -3141,7 +3143,9 @@
     if (v.filters && "facility" in v.filters) v.filters.facility = seeAll() ? state.home : "";
     const homeAware = seeAll() && (v.homeAware || (v.filters && "facility" in v.filters));
     if (homeAware) fillHomePick();
-    $("#homeBar").classList.toggle("hidden", !homeAware);
+    // Works with both the new home bar and the older page layout (cached app.html)
+    const bar = $("#homeBar") || $("#homePickWrap");
+    if (bar) bar.classList.toggle("hidden", !homeAware);
     const navName = (typeof v.navAs === "function" ? v.navAs() : v.navAs) || name;
     $$("#nav a").forEach((a) => a.classList.toggle("active", a.getAttribute("href") === "#" + navName));
     $("#pageTitle").textContent = v.title;
@@ -3191,12 +3195,12 @@
       // First visit: managers start on their own home, admins on all homes
       setHome(saved == null ? (me.role === "manager" ? me.facility_id : "") : saved === "all" ? "" : saved, { save: false });
       fillHomePick();
-      $("#homePick").addEventListener("change", (e) => { setHome(e.target.value); route(); });
-      $("#homeTabs").addEventListener("click", (e) => {
+      $("#homePick")?.addEventListener("change", (e) => { setHome(e.target.value); route(); });
+      $("#homeTabs")?.addEventListener("click", (e) => {
         const b = e.target.closest("[data-home-tab]"); if (!b || b.dataset.homeTab === state.home) return;
         setHome(b.dataset.homeTab); route();
       });
-      $("#homeAdd").addEventListener("click", () => editFacility(null));
+      $("#homeAdd")?.addEventListener("click", () => editFacility(null));
     }
     $("#shell").classList.remove("hidden");
     route();
