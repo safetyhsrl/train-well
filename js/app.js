@@ -9,7 +9,7 @@
 
   // ---------------------------------------------------------------- state
   const state = { me: null, facilities: [], courses: [], home: "" };
-  const isAdmin = () => state.me && state.me.role === "admin";
+  const isAdmin = (who = state.me) => !!who && who.role === "admin";
   // Admins and managers work across every home; employees only see their own records
   const seeAll = () => !!state.me && (state.me.role === "admin" || state.me.role === "manager");
 
@@ -860,10 +860,12 @@
             || `<tr><td colspan="5" class="empty">Not listed on any fire drill yet.</td></tr>`}
         </tbody></table></div>`,
       footer: `<div class="modal-foot">
+        <button type="button" class="secondary" data-viewas>See what they see</button>
         <button type="button" class="secondary" data-edit>Edit details</button>
         <button type="button" class="secondary" data-upload>Upload certificate</button>
         <button type="button" data-addrec>+ Add training record</button></div>`
     });
+    $("[data-viewas]", form)?.addEventListener("click", () => { close(); startPreview(e.id); });
     $("[data-edit]", form).onclick = () => editEmployee(e);
     $("[data-addrec]", form).onclick = () => editRecord(null, { employeeIds: [e.id] });
     $("[data-upload]", form).onclick = () => uploadCertificate({ employeeId: e.id, title: `Upload certificate for ${fullName(e)}` });
@@ -2031,7 +2033,7 @@
 
     const markSeen = async (m) => {
       if (preview || seen.has(m.id)) return;
-      const { error } = await sb.from("material_views").upsert({ employee_id: state.me.employee_id, material_id: m.id }, { onConflict: "employee_id,material_id", ignoreDuplicates: true });
+      const { error } = state.preview ? { error: null } : await sb.from("material_views").upsert({ employee_id: state.me.employee_id, material_id: m.id }, { onConflict: "employee_id,material_id", ignoreDuplicates: true });
       if (!error) { seen.add(m.id); drawSteps(); }
     };
 
@@ -2952,7 +2954,8 @@
   views.mysessions = {
     title: "My sessions", employee: true,
     async render(view) {
-      const all = check(await sb.from("sessions").select("*, attendance(status, employee_id)").order("starts_at"));
+      const all = check(await sb.from("sessions").select("*, attendance(status, employee_id)").order("starts_at"))
+        .filter((s) => s.attendance.some((a) => a.employee_id === state.me.employee_id));
       const now = new Date().toISOString();
       const up = all.filter((s) => s.starts_at >= now);
       const past = all.filter((s) => s.starts_at < now).reverse().slice(0, 20);
@@ -2971,8 +2974,9 @@
   views.mydrills = {
     title: "My fire drills", employee: true,
     async render(view) {
-      const { data, error } = await sb.from("fire_drills").select("*").order("drill_date", { ascending: false });
+      const { data: all, error } = await sb.from("fire_drills").select("*, fire_drill_participants(employee_id)").order("drill_date", { ascending: false });
       if (error) { view.innerHTML = `<div class="card empty">Fire drills aren't available yet.</div>`; return; }
+      const data = all.filter((d) => (d.fire_drill_participants || []).some((x) => x.employee_id === state.me.employee_id));
       view.innerHTML = `
         <div class="card">
           <p class="muted" style="margin-top:0">Fire drills and fire alarms you took part in.</p>
@@ -3054,8 +3058,8 @@
           detail: "Upload your certificate once it's done.", go: () => goTo("#my")
         });
       }
-      const { data: sess } = await sb.from("sessions").select("id, starts_at, course_id, location").gte("starts_at", new Date().toISOString()).order("starts_at");
-      for (const x of (sess || []).filter((y) => y.starts_at.slice(0, 10) <= soon))
+      const { data: sess } = await sb.from("sessions").select("id, starts_at, course_id, location, attendance(employee_id)").gte("starts_at", new Date().toISOString()).order("starts_at");
+      for (const x of (sess || []).filter((y) => y.starts_at.slice(0, 10) <= soon && (y.attendance || []).some((a) => a.employee_id === state.me.employee_id)))
         notes.push({ key: `sess:${x.id}`, level: "info", title: `${courseTitle(x.course_id)} on ${fmtDateTime(x.starts_at)}`,
           detail: x.location ? `Location: ${x.location}` : "Training session you're booked into.", go: () => goTo("#mysessions") });
       return notes;
@@ -3177,6 +3181,79 @@
   window.addEventListener("hashchange", () => { $("#modalRoot").innerHTML = ""; route(); });
 
   // ============================================================== BOOT
+  // =============================================================== VIEW AS STAFF (preview)
+  // Admins and managers can see Train Well exactly as one staff member sees it. Read-only:
+  // anything that would save (uploads, deletes, offering or picking up shifts) is blocked.
+  function applyChrome() {
+    const emp = isEmployee();
+    $$(".staff-only").forEach((el) => el.classList.toggle("hidden", emp));
+    $$(".admin-only").forEach((el) => el.classList.toggle("hidden", emp || !isAdmin()));
+    $$(".employee-only").forEach((el) => el.classList.toggle("hidden", !emp));
+    $("#meName").textContent = (state.realMe || state.me).full_name;
+    $("#meRole").textContent = state.preview ? `Viewing as ${state.me.full_name}`
+      : state.me.role === "admin" ? "Administrator · all homes"
+      : state.me.role === "employee" ? `Staff · ${facilityName(state.myEmp?.facility_id)}` : `Manager · ${facilityName(state.me.facility_id)}`;
+    let bar = $("#previewBar");
+    if (state.preview) {
+      if (!bar) { bar = document.createElement("div"); bar.id = "previewBar"; bar.className = "preview-bar"; $(".main").prepend(bar); }
+      bar.innerHTML = `<span><strong>You're seeing Train Well as ${esc(state.me.full_name)}</strong>
+          <span class="muted-on-dark">Staff · ${esc(facilityName(state.myEmp?.facility_id))} · preview only, nothing here is saved</span></span>
+        <span class="preview-actions"><button type="button" class="small secondary" data-preview-pick>Someone else</button>
+          <button type="button" class="small" data-preview-exit>Back to ${isAdmin(state.realMe) ? "admin" : "manager"} view</button></span>`;
+      $("[data-preview-exit]", bar).onclick = stopPreview;
+      $("[data-preview-pick]", bar).onclick = pickPreview;
+    } else if (bar) bar.remove();
+  }
+  async function startPreview(empId) {
+    const emp = check(await sb.from("employees").select("*").eq("id", empId).maybeSingle());
+    if (!emp) { toast("That employee couldn't be found.", true); return; }
+    state.realMe = state.realMe || state.me;
+    state.preview = true;
+    state.me = { ...state.realMe, role: "employee", employee_id: emp.id, full_name: fullName(emp) };
+    state.myEmp = emp;
+    applyChrome(); refreshBell();
+    if (location.hash === "#my") route(); else goTo("#my");
+    toast(`Showing what ${emp.first_name} sees`);
+  }
+  function stopPreview() {
+    if (!state.preview) return;
+    state.me = state.realMe; state.realMe = null; state.preview = false; state.myEmp = null;
+    applyChrome(); refreshBell();
+    goTo("#employees");
+  }
+  async function pickPreview() {
+    const real = state.realMe || state.me;
+    const emps = (await loadEmployees({ activeOnly: true })).sort((a, b) => fullName(a).localeCompare(fullName(b)));
+    const { form, close } = openModal({
+      title: "See Train Well as a staff member",
+      body: `<p class="muted" style="margin-top:0">Pick someone to see exactly what they see when they sign in: their training, certificates, courses, sessions, fire drills and schedule. It's a preview, so nothing you click is saved.</p>
+        <div class="field"><label>Home</label><select data-pv-home>${facilityOptions(state.preview ? String(state.myEmp.facility_id) : (state.home || ""), { includeAll: true })}</select></div>
+        <div class="field"><label>Find</label><input type="search" data-pv-q placeholder="Type a name…"></div>
+        <div class="pv-list" data-pv-list></div>`,
+      footer: `<div class="modal-foot"><button type="button" class="secondary" data-close>Cancel</button></div>`
+    });
+    const draw = () => {
+      const h = $("[data-pv-home]", form).value, q = $("[data-pv-q]", form).value.trim().toLowerCase();
+      const list = emps.filter((e) => (!h || String(e.facility_id) === h) && (!q || fullName(e).toLowerCase().includes(q))).slice(0, 80);
+      $("[data-pv-list]", form).innerHTML = list.map((e) => `<button type="button" class="pv-item" data-pv="${e.id}">
+          <strong>${esc(fullName(e))}</strong><span class="muted">${esc(e.job_title || "")}${e.job_title ? " · " : ""}${esc(facilityName(e.facility_id))}</span></button>`).join("")
+        || `<p class="muted">Nobody matches.</p>`;
+    };
+    $("[data-pv-home]", form).addEventListener("change", draw);
+    $("[data-pv-q]", form).addEventListener("input", draw);
+    $("[data-pv-list]", form).addEventListener("click", (ev) => { const b = ev.target.closest("[data-pv]"); if (b) { close(); startPreview(Number(b.dataset.pv)); } });
+    draw(); $("[data-pv-q]", form).focus();
+    void real;
+  }
+  // Block anything that would save while previewing
+  document.addEventListener("click", (ev) => {
+    if (!state.preview) return;
+    const t = ev.target.closest('[data-up], [data-act="upload"], [data-del], .sc [data-act="offer"], .sc [data-act="pickup"], .sc [data-act="cancel"], #view [data-submit]');
+    if (!t) return;
+    ev.preventDefault(); ev.stopPropagation();
+    toast("Preview only: staff can do this when they sign in, but nothing is saved while you're previewing.");
+  }, true);
+
   (async function boot() {
     const { data } = await sb.auth.getSession();
     if (!data.session) { location.replace("index.html"); return; }
@@ -3192,13 +3269,9 @@
     if (isEmployee()) {
       if (!me.employee_id) throw new Error("This login isn't linked to an employee record. Ask your administrator.");
       state.myEmp = check(await sb.from("employees").select("*").eq("id", me.employee_id).maybeSingle());
-      $$(".staff-only, .admin-only").forEach((el) => el.classList.add("hidden"));
-      $$(".employee-only").forEach((el) => el.classList.remove("hidden"));
     }
-    $("#meName").textContent = me.full_name;
-    $("#meRole").textContent = me.role === "admin" ? "Administrator · all homes"
-      : me.role === "employee" ? `Staff · ${facilityName(state.myEmp?.facility_id)}` : `Manager · ${facilityName(me.facility_id)}`;
-    if (!isAdmin()) $$(".admin-only").forEach((el) => el.classList.add("hidden"));
+    applyChrome();
+    $("#previewLink")?.addEventListener("click", (ev) => { ev.preventDefault(); pickPreview(); });
     if (seeAll()) {
       let saved = null; try { saved = localStorage.getItem(HOME_KEY); } catch (_) { /* private mode */ }
       // First visit: managers start on their own home, admins on all homes
