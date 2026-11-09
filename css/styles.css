@@ -579,3 +579,17 @@ tr.row-link:hover .small-arrow { color: var(--brand); }
   .home-bar { margin-top: 0; }
 }
 @media print { .home-bar { display: none !important; } }
+
+/* ---------- View as staff (preview) ---------- */
+.preview-bar { position: sticky; top: 0; z-index: 40; display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: .6rem 1rem;
+  margin: -.5rem 0 1rem; padding: .7rem 1rem; border-radius: 10px; background: #1d3b30; color: #fff; box-shadow: 0 4px 14px rgba(0,0,0,.15); }
+.preview-bar > span:first-child { display: grid; gap: .1rem; }
+.preview-bar .muted-on-dark { color: #bcd4ca; font-size: .85rem; }
+.preview-actions { display: flex; gap: .5rem; flex-wrap: wrap; }
+.preview-bar button.secondary { background: transparent; color: #fff; border-color: rgba(255,255,255,.5); }
+.preview-bar button.secondary:hover { background: rgba(255,255,255,.12); }
+.pv-list { display: grid; gap: .35rem; max-height: 340px; overflow-y: auto; }
+.pv-item { display: grid; gap: .1rem; justify-items: start; text-align: left; padding: .6rem .8rem; border-radius: 8px; border: 1.5px solid var(--border);
+  background: var(--surface); color: var(--text); font-weight: 400; }
+.pv-item:hover { border-color: var(--brand); background: var(--brand-soft); color: var(--text); }
+.pv-item .muted { font-size: .82rem; }
